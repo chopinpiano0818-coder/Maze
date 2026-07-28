@@ -12,7 +12,6 @@
 const int SCREEN_WIDTH = 1000;
 const int SCREEN_HEIGHT = 700;
 
-// 迷路の縦横は奇数にする
 const int MAZE_WIDTH = 61;
 const int MAZE_HEIGHT = 61;
 
@@ -36,16 +35,14 @@ std::vector<std::vector<int>> maze(
 
 std::mt19937 randomEngine(std::random_device{}());
 
-// プレイヤーの位置
 double playerX = 1.5;
 double playerY = 1.5;
-
-// プレイヤーの向き
 double playerAngle = 0.0;
 
-// ゴール
 int goalX = MAZE_WIDTH - 2;
 int goalY = MAZE_HEIGHT - 2;
+
+bool mapOpen = false;
 
 bool isInsideMaze(int x, int y) {
     return x > 0 &&
@@ -109,6 +106,8 @@ void generateMaze() {
 
     maze[1][1] = 0;
     maze[goalY][goalX] = 0;
+
+    mapOpen = false;
 }
 
 TTF_Font* openFont(int size) {
@@ -335,8 +334,6 @@ void tryMove(double moveX, double moveY) {
     double nextX = playerX + moveX;
     double nextY = playerY + moveY;
 
-    // X方向とY方向を別々に判定する
-    // これにより壁に沿って滑らかに移動できる
     if (canMoveTo(nextX, playerY)) {
         playerX = nextX;
     }
@@ -347,10 +344,14 @@ void tryMove(double moveX, double moveY) {
 }
 
 void updatePlayer(double deltaTime) {
+    if (mapOpen) {
+        return;
+    }
+
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
 
     const double moveSpeed = 3.0;
-    const double rotationSpeed = 2.2;
+    const double movement = moveSpeed * deltaTime;
 
     double forwardX = std::cos(playerAngle);
     double forwardY = std::sin(playerAngle);
@@ -358,9 +359,7 @@ void updatePlayer(double deltaTime) {
     double rightX = -std::sin(playerAngle);
     double rightY = std::cos(playerAngle);
 
-    double movement = moveSpeed * deltaTime;
-
-    // 前進
+    // Wまたは上矢印：前進
     if (
         keys[SDL_SCANCODE_W] ||
         keys[SDL_SCANCODE_UP]
@@ -371,7 +370,7 @@ void updatePlayer(double deltaTime) {
         );
     }
 
-    // 後退
+    // Sまたは下矢印：後退
     if (
         keys[SDL_SCANCODE_S] ||
         keys[SDL_SCANCODE_DOWN]
@@ -382,48 +381,54 @@ void updatePlayer(double deltaTime) {
         );
     }
 
-    // 左へ平行移動
-    if (keys[SDL_SCANCODE_A]) {
+    // Aまたは左矢印：左へ平行移動
+    if (
+        keys[SDL_SCANCODE_A] ||
+        keys[SDL_SCANCODE_LEFT]
+    ) {
         tryMove(
             -rightX * movement,
             -rightY * movement
         );
     }
 
-    // 右へ平行移動
-    if (keys[SDL_SCANCODE_D]) {
+    // Dまたは右矢印：右へ平行移動
+    if (
+        keys[SDL_SCANCODE_D] ||
+        keys[SDL_SCANCODE_RIGHT]
+    ) {
         tryMove(
             rightX * movement,
             rightY * movement
         );
     }
+}
 
-    // 左を向く
-    if (keys[SDL_SCANCODE_LEFT]) {
-        playerAngle -= rotationSpeed * deltaTime;
+void updateMouseLook(int mouseMovementX) {
+    if (mapOpen) {
+        return;
     }
 
-    // 右を向く
-    if (keys[SDL_SCANCODE_RIGHT]) {
-        playerAngle += rotationSpeed * deltaTime;
-    }
+    const double mouseSensitivity = 0.0025;
 
-    if (playerAngle < 0.0) {
+    playerAngle += mouseMovementX * mouseSensitivity;
+
+    while (playerAngle < 0.0) {
         playerAngle += PI * 2.0;
     }
 
-    if (playerAngle >= PI * 2.0) {
+    while (playerAngle >= PI * 2.0) {
         playerAngle -= PI * 2.0;
     }
 }
 
 void draw3DView(SDL_Renderer* renderer) {
-    // 天井
+    // 暗い天井
     SDL_SetRenderDrawColor(
         renderer,
-        35,
-        42,
-        55,
+        6,
+        8,
+        13,
         255
     );
 
@@ -439,12 +444,12 @@ void draw3DView(SDL_Renderer* renderer) {
         &ceiling
     );
 
-    // 床
+    // 暗い床
     SDL_SetRenderDrawColor(
         renderer,
-        65,
-        62,
-        58,
+        14,
+        13,
+        12,
         255
     );
 
@@ -462,18 +467,19 @@ void draw3DView(SDL_Renderer* renderer) {
 
     const double fieldOfView = PI / 3.0;
 
-    // 画面の縦線1本ずつ光線を飛ばす
+    double directionX = std::cos(playerAngle);
+    double directionY = std::sin(playerAngle);
+
+    double planeLength = std::tan(fieldOfView / 2.0);
+
+    double planeX = -directionY * planeLength;
+    double planeY = directionX * planeLength;
+
     for (int screenX = 0; screenX < SCREEN_WIDTH; screenX++) {
         double cameraX =
-            2.0 * screenX / static_cast<double>(SCREEN_WIDTH) - 1.0;
-
-        double directionX = std::cos(playerAngle);
-        double directionY = std::sin(playerAngle);
-
-        double planeLength = std::tan(fieldOfView / 2.0);
-
-        double planeX = -directionY * planeLength;
-        double planeY = directionX * planeLength;
+            2.0 * screenX /
+            static_cast<double>(SCREEN_WIDTH) -
+            1.0;
 
         double rayDirectionX =
             directionX + planeX * cameraX;
@@ -484,21 +490,15 @@ void draw3DView(SDL_Renderer* renderer) {
         int mapX = static_cast<int>(playerX);
         int mapY = static_cast<int>(playerY);
 
-        double deltaDistanceX;
+        double deltaDistanceX =
+            rayDirectionX == 0.0
+            ? 1e30
+            : std::abs(1.0 / rayDirectionX);
 
-        if (rayDirectionX == 0.0) {
-            deltaDistanceX = 1e30;
-        } else {
-            deltaDistanceX = std::abs(1.0 / rayDirectionX);
-        }
-
-        double deltaDistanceY;
-
-        if (rayDirectionY == 0.0) {
-            deltaDistanceY = 1e30;
-        } else {
-            deltaDistanceY = std::abs(1.0 / rayDirectionY);
-        }
+        double deltaDistanceY =
+            rayDirectionY == 0.0
+            ? 1e30
+            : std::abs(1.0 / rayDirectionY);
 
         int stepX;
         int stepY;
@@ -510,24 +510,28 @@ void draw3DView(SDL_Renderer* renderer) {
             stepX = -1;
 
             sideDistanceX =
-                (playerX - mapX) * deltaDistanceX;
+                (playerX - mapX) *
+                deltaDistanceX;
         } else {
             stepX = 1;
 
             sideDistanceX =
-                (mapX + 1.0 - playerX) * deltaDistanceX;
+                (mapX + 1.0 - playerX) *
+                deltaDistanceX;
         }
 
         if (rayDirectionY < 0.0) {
             stepY = -1;
 
             sideDistanceY =
-                (playerY - mapY) * deltaDistanceY;
+                (playerY - mapY) *
+                deltaDistanceY;
         } else {
             stepY = 1;
 
             sideDistanceY =
-                (mapY + 1.0 - playerY) * deltaDistanceY;
+                (mapY + 1.0 - playerY) *
+                deltaDistanceY;
         }
 
         bool wallHit = false;
@@ -563,10 +567,12 @@ void draw3DView(SDL_Renderer* renderer) {
 
         if (wallSide == 0) {
             wallDistance =
-                sideDistanceX - deltaDistanceX;
+                sideDistanceX -
+                deltaDistanceX;
         } else {
             wallDistance =
-                sideDistanceY - deltaDistanceY;
+                sideDistanceY -
+                deltaDistanceY;
         }
 
         if (wallDistance < 0.01) {
@@ -578,43 +584,74 @@ void draw3DView(SDL_Renderer* renderer) {
         );
 
         int wallTop =
-            -wallHeight / 2 +
-            SCREEN_HEIGHT / 2;
+            SCREEN_HEIGHT / 2 -
+            wallHeight / 2;
 
         int wallBottom =
-            wallHeight / 2 +
-            SCREEN_HEIGHT / 2;
+            SCREEN_HEIGHT / 2 +
+            wallHeight / 2;
 
-        if (wallTop < 0) {
-            wallTop = 0;
-        }
+        wallTop = std::max(0, wallTop);
+        wallBottom = std::min(
+            SCREEN_HEIGHT - 1,
+            wallBottom
+        );
 
-        if (wallBottom >= SCREEN_HEIGHT) {
-            wallBottom = SCREEN_HEIGHT - 1;
-        }
+        /*
+         * 懐中電灯の光。
+         *
+         * 画面中央ほど明るく、
+         * 左右の端ほど暗くする。
+         */
+        double centerDistance =
+            std::abs(cameraX);
 
-        // 距離によって壁を暗くする
+        double flashlight =
+            1.0 - centerDistance;
+
+        flashlight = std::max(
+            0.0,
+            flashlight
+        );
+
+        // 光の中心を強くする
+        flashlight = std::pow(
+            flashlight,
+            2.3
+        );
+
+        // 距離が遠い壁は暗くする
+        double distanceLight =
+            1.0 /
+            (1.0 + wallDistance * 0.18);
+
         int brightness = static_cast<int>(
-            230.0 / (1.0 + wallDistance * 0.12)
+            20 +
+            flashlight *
+            distanceLight *
+            235
         );
 
-        brightness = std::clamp(
-            brightness,
-            35,
-            220
-        );
-
-        // 横向きの壁は少し暗くする
         if (wallSide == 1) {
             brightness =
-                static_cast<int>(brightness * 0.72);
+                static_cast<int>(
+                    brightness * 0.72
+                );
         }
+
+        brightness = std::max(
+            15,
+            std::min(255, brightness)
+        );
 
         SDL_SetRenderDrawColor(
             renderer,
             brightness,
             brightness,
-            std::min(255, brightness + 18),
+            std::min(
+                255,
+                brightness + 15
+            ),
             255
         );
 
@@ -628,182 +665,116 @@ void draw3DView(SDL_Renderer* renderer) {
     }
 }
 
-void drawMiniMap(SDL_Renderer* renderer) {
-    const int mapSize = 190;
-    const int mapX = SCREEN_WIDTH - mapSize - 15;
-    const int mapY = 15;
-
-    const int visibleRadius = 7;
-    const int miniTile = 12;
-
+void drawFlashlightBeam(SDL_Renderer* renderer) {
     SDL_SetRenderDrawBlendMode(
         renderer,
         SDL_BLENDMODE_BLEND
     );
 
-    SDL_SetRenderDrawColor(
-        renderer,
-        5,
-        8,
-        12,
-        210
-    );
+    /*
+     * 懐中電灯の光が分かりやすいように、
+     * 画面中央から床へ向かう淡い光を描く。
+     */
 
-    SDL_Rect background = {
-        mapX,
-        mapY,
-        mapSize,
-        mapSize
-    };
+    const int centerX = SCREEN_WIDTH / 2;
+    const int horizonY = SCREEN_HEIGHT / 2;
 
-    SDL_RenderFillRect(
-        renderer,
-        &background
-    );
+    for (int layer = 12; layer >= 1; layer--) {
+        int halfWidthTop = layer * 7;
+        int halfWidthBottom = layer * 22;
 
-    int playerMapX = static_cast<int>(playerX);
-    int playerMapY = static_cast<int>(playerY);
+        int alpha = 2 + (13 - layer);
 
-    for (
-        int mazeY = playerMapY - visibleRadius;
-        mazeY <= playerMapY + visibleRadius;
-        mazeY++
-    ) {
-        for (
-            int mazeX = playerMapX - visibleRadius;
-            mazeX <= playerMapX + visibleRadius;
-            mazeX++
-        ) {
-            int relativeX =
-                mazeX - playerMapX + visibleRadius;
+        SDL_SetRenderDrawColor(
+            renderer,
+            235,
+            240,
+            210,
+            alpha
+        );
 
-            int relativeY =
-                mazeY - playerMapY + visibleRadius;
-
-            SDL_Rect tile = {
-                mapX + 5 + relativeX * miniTile,
-                mapY + 5 + relativeY * miniTile,
-                miniTile,
-                miniTile
-            };
-
-            if (
-                mazeX < 0 ||
-                mazeX >= MAZE_WIDTH ||
-                mazeY < 0 ||
-                mazeY >= MAZE_HEIGHT
-            ) {
-                SDL_SetRenderDrawColor(
-                    renderer,
-                    20,
-                    20,
-                    25,
-                    255
+        for (int y = horizonY; y < SCREEN_HEIGHT; y++) {
+            double progress =
+                static_cast<double>(
+                    y - horizonY
+                ) /
+                static_cast<double>(
+                    SCREEN_HEIGHT - horizonY
                 );
-            } else if (
-                mazeX == goalX &&
-                mazeY == goalY
-            ) {
-                SDL_SetRenderDrawColor(
-                    renderer,
-                    50,
-                    220,
-                    100,
-                    255
-                );
-            } else if (maze[mazeY][mazeX] == 1) {
-                SDL_SetRenderDrawColor(
-                    renderer,
-                    75,
-                    85,
-                    105,
-                    255
-                );
-            } else {
-                SDL_SetRenderDrawColor(
-                    renderer,
-                    195,
-                    195,
-                    190,
-                    255
-                );
-            }
 
-            SDL_RenderFillRect(
+            int halfWidth =
+                static_cast<int>(
+                    halfWidthTop +
+                    (halfWidthBottom - halfWidthTop) *
+                    progress
+                );
+
+            SDL_RenderDrawLine(
                 renderer,
-                &tile
+                centerX - halfWidth,
+                y,
+                centerX + halfWidth,
+                y
             );
         }
     }
+}
 
-    int centerX =
-        mapX + 5 +
-        visibleRadius * miniTile +
-        miniTile / 2;
-
-    int centerY =
-        mapY + 5 +
-        visibleRadius * miniTile +
-        miniTile / 2;
-
-    // プレイヤー
-    SDL_SetRenderDrawColor(
+void drawDarkEdges(SDL_Renderer* renderer) {
+    SDL_SetRenderDrawBlendMode(
         renderer,
-        40,
-        130,
-        255,
-        255
+        SDL_BLENDMODE_BLEND
     );
 
-    SDL_Rect playerRect = {
-        centerX - 4,
-        centerY - 4,
-        8,
-        8
-    };
+    /*
+     * 画面の左右を段階的に暗くして、
+     * 光が中央方向へ出ているように見せる。
+     */
+    const int layers = 14;
+    const int layerWidth =
+        SCREEN_WIDTH / 2 / layers;
 
-    SDL_RenderFillRect(
-        renderer,
-        &playerRect
-    );
+    for (int i = 0; i < layers; i++) {
+        int alpha =
+            static_cast<int>(
+                170.0 *
+                (layers - i) /
+                layers
+            );
 
-    // 向いている方向
-    SDL_SetRenderDrawColor(
-        renderer,
-        255,
-        255,
-        255,
-        255
-    );
+        SDL_SetRenderDrawColor(
+            renderer,
+            0,
+            0,
+            0,
+            alpha
+        );
 
-    int directionEndX =
-        centerX +
-        static_cast<int>(std::cos(playerAngle) * 15.0);
+        SDL_Rect leftShade = {
+            i * layerWidth,
+            0,
+            layerWidth + 1,
+            SCREEN_HEIGHT
+        };
 
-    int directionEndY =
-        centerY +
-        static_cast<int>(std::sin(playerAngle) * 15.0);
+        SDL_Rect rightShade = {
+            SCREEN_WIDTH -
+            (i + 1) * layerWidth,
+            0,
+            layerWidth + 1,
+            SCREEN_HEIGHT
+        };
 
-    SDL_RenderDrawLine(
-        renderer,
-        centerX,
-        centerY,
-        directionEndX,
-        directionEndY
-    );
+        SDL_RenderFillRect(
+            renderer,
+            &leftShade
+        );
 
-    SDL_SetRenderDrawColor(
-        renderer,
-        220,
-        225,
-        235,
-        255
-    );
-
-    SDL_RenderDrawRect(
-        renderer,
-        &background
-    );
+        SDL_RenderFillRect(
+            renderer,
+            &rightShade
+        );
+    }
 }
 
 void drawCrosshair(SDL_Renderer* renderer) {
@@ -814,8 +785,8 @@ void drawCrosshair(SDL_Renderer* renderer) {
         renderer,
         255,
         255,
-        255,
-        210
+        230,
+        220
     );
 
     SDL_RenderDrawLine(
@@ -835,12 +806,210 @@ void drawCrosshair(SDL_Renderer* renderer) {
     );
 }
 
+void drawFullMap(
+    SDL_Renderer* renderer,
+    TTF_Font* titleFont,
+    TTF_Font* smallFont
+) {
+    SDL_SetRenderDrawColor(
+        renderer,
+        9,
+        12,
+        18,
+        255
+    );
+
+    SDL_RenderClear(renderer);
+
+    drawText(
+        renderer,
+        titleFont,
+        "迷路地図",
+        SCREEN_WIDTH / 2,
+        42
+    );
+
+    int availableWidth =
+        SCREEN_WIDTH - 100;
+
+    int availableHeight =
+        SCREEN_HEIGHT - 140;
+
+    int tileWidth =
+        availableWidth / MAZE_WIDTH;
+
+    int tileHeight =
+        availableHeight / MAZE_HEIGHT;
+
+    int tileSize =
+        std::min(tileWidth, tileHeight);
+
+    if (tileSize < 1) {
+        tileSize = 1;
+    }
+
+    int mazePixelWidth =
+        MAZE_WIDTH * tileSize;
+
+    int mazePixelHeight =
+        MAZE_HEIGHT * tileSize;
+
+    int offsetX =
+        (SCREEN_WIDTH - mazePixelWidth) / 2;
+
+    int offsetY =
+        80 +
+        (availableHeight - mazePixelHeight) / 2;
+
+    for (int y = 0; y < MAZE_HEIGHT; y++) {
+        for (int x = 0; x < MAZE_WIDTH; x++) {
+            SDL_Rect tile = {
+                offsetX + x * tileSize,
+                offsetY + y * tileSize,
+                tileSize,
+                tileSize
+            };
+
+            if (maze[y][x] == 1) {
+                SDL_SetRenderDrawColor(
+                    renderer,
+                    35,
+                    42,
+                    55,
+                    255
+                );
+            } else {
+                SDL_SetRenderDrawColor(
+                    renderer,
+                    215,
+                    215,
+                    205,
+                    255
+                );
+            }
+
+            SDL_RenderFillRect(
+                renderer,
+                &tile
+            );
+        }
+    }
+
+    // ゴール
+    SDL_Rect goalRect = {
+        offsetX + goalX * tileSize,
+        offsetY + goalY * tileSize,
+        tileSize,
+        tileSize
+    };
+
+    SDL_SetRenderDrawColor(
+        renderer,
+        50,
+        220,
+        100,
+        255
+    );
+
+    SDL_RenderFillRect(
+        renderer,
+        &goalRect
+    );
+
+    int playerMapX =
+        static_cast<int>(playerX);
+
+    int playerMapY =
+        static_cast<int>(playerY);
+
+    int playerCenterX =
+        offsetX +
+        playerMapX * tileSize +
+        tileSize / 2;
+
+    int playerCenterY =
+        offsetY +
+        playerMapY * tileSize +
+        tileSize / 2;
+
+    int playerSize =
+        std::max(6, tileSize);
+
+    SDL_Rect playerRect = {
+        playerCenterX - playerSize / 2,
+        playerCenterY - playerSize / 2,
+        playerSize,
+        playerSize
+    };
+
+    SDL_SetRenderDrawColor(
+        renderer,
+        40,
+        130,
+        255,
+        255
+    );
+
+    SDL_RenderFillRect(
+        renderer,
+        &playerRect
+    );
+
+    // 地図上でも向いている方向を表示
+    int directionLength =
+        std::max(16, tileSize * 3);
+
+    int directionEndX =
+        playerCenterX +
+        static_cast<int>(
+            std::cos(playerAngle) *
+            directionLength
+        );
+
+    int directionEndY =
+        playerCenterY +
+        static_cast<int>(
+            std::sin(playerAngle) *
+            directionLength
+        );
+
+    SDL_SetRenderDrawColor(
+        renderer,
+        255,
+        230,
+        90,
+        255
+    );
+
+    SDL_RenderDrawLine(
+        renderer,
+        playerCenterX,
+        playerCenterY,
+        directionEndX,
+        directionEndY
+    );
+
+    drawText(
+        renderer,
+        smallFont,
+        "青：自分　黄色い線：向いている方向　緑：ゴール　T：地図を閉じる",
+        SCREEN_WIDTH / 2,
+        SCREEN_HEIGHT - 25
+    );
+}
+
 void drawGame(
     SDL_Renderer* renderer,
     TTF_Font* smallFont
 ) {
     draw3DView(renderer);
-    drawMiniMap(renderer);
+
+    // 床へ向かう光
+    drawFlashlightBeam(renderer);
+
+    // 周囲を暗くして光の方向を強調
+    drawDarkEdges(renderer);
+
     drawCrosshair(renderer);
 
     SDL_SetRenderDrawBlendMode(
@@ -853,7 +1022,7 @@ void drawGame(
         5,
         8,
         12,
-        190
+        185
     );
 
     SDL_Rect informationBar = {
@@ -871,7 +1040,7 @@ void drawGame(
     drawText(
         renderer,
         smallFont,
-        "W・↑ 前進　S・↓ 後退　A・D 平行移動　←・→ 回転　Esc ホーム",
+        "WASD・矢印：移動　マウス：視点　T：地図　Esc：ホーム",
         SCREEN_WIDTH / 2,
         SCREEN_HEIGHT - 24
     );
@@ -918,12 +1087,31 @@ void drawClear(
 }
 
 bool playerReachedGoal() {
-    int currentX = static_cast<int>(playerX);
-    int currentY = static_cast<int>(playerY);
+    int currentX =
+        static_cast<int>(playerX);
+
+    int currentY =
+        static_cast<int>(playerY);
 
     return
         currentX == goalX &&
         currentY == goalY;
+}
+
+void startGame() {
+    generateMaze();
+
+    SDL_SetRelativeMouseMode(
+        SDL_TRUE
+    );
+}
+
+void returnHome() {
+    mapOpen = false;
+
+    SDL_SetRelativeMouseMode(
+        SDL_FALSE
+    );
 }
 
 int main() {
@@ -993,9 +1181,14 @@ int main() {
         return 1;
     }
 
-    TTF_Font* titleFont = openFont(54);
+    SDL_SetRenderDrawBlendMode(
+        renderer,
+        SDL_BLENDMODE_BLEND
+    );
+
+    TTF_Font* titleFont = openFont(50);
     TTF_Font* buttonFont = openFont(30);
-    TTF_Font* smallFont = openFont(18);
+    TTF_Font* smallFont = openFont(17);
 
     if (
         titleFont == nullptr ||
@@ -1012,6 +1205,7 @@ int main() {
 
         TTF_Quit();
         SDL_Quit();
+
         return 1;
     }
 
@@ -1030,7 +1224,8 @@ int main() {
         "ルール"
     };
 
-    GameState gameState = GameState::HOME;
+    GameState gameState =
+        GameState::HOME;
 
     bool running = true;
 
@@ -1043,15 +1238,16 @@ int main() {
 
         double deltaTime =
             static_cast<double>(
-                currentCounter - previousCounter
+                currentCounter -
+                previousCounter
             ) /
             static_cast<double>(
                 SDL_GetPerformanceFrequency()
             );
 
-        previousCounter = currentCounter;
+        previousCounter =
+            currentCounter;
 
-        // ウィンドウ移動後などの大きな時間差を制限する
         if (deltaTime > 0.05) {
             deltaTime = 0.05;
         }
@@ -1064,12 +1260,18 @@ int main() {
             }
 
             if (
-                event.type == SDL_MOUSEBUTTONDOWN &&
-                event.button.button == SDL_BUTTON_LEFT &&
-                gameState == GameState::HOME
+                event.type ==
+                    SDL_MOUSEBUTTONDOWN &&
+                event.button.button ==
+                    SDL_BUTTON_LEFT &&
+                gameState ==
+                    GameState::HOME
             ) {
-                int mouseX = event.button.x;
-                int mouseY = event.button.y;
+                int mouseX =
+                    event.button.x;
+
+                int mouseY =
+                    event.button.y;
 
                 if (
                     isButtonClicked(
@@ -1078,44 +1280,97 @@ int main() {
                         mouseY
                     )
                 ) {
-                    generateMaze();
-                    gameState = GameState::GAME;
+                    startGame();
+
+                    gameState =
+                        GameState::GAME;
                 }
             }
 
+            if (
+                event.type ==
+                    SDL_MOUSEMOTION &&
+                gameState ==
+                    GameState::GAME &&
+                !mapOpen
+            ) {
+                updateMouseLook(
+                    event.motion.xrel
+                );
+            }
+
             if (event.type == SDL_KEYDOWN) {
-                SDL_Keycode key = event.key.keysym.sym;
+                SDL_Keycode key =
+                    event.key.keysym.sym;
+
+                if (
+                    key == SDLK_t &&
+                    gameState ==
+                        GameState::GAME
+                ) {
+                    mapOpen = !mapOpen;
+
+                    if (mapOpen) {
+                        SDL_SetRelativeMouseMode(
+                            SDL_FALSE
+                        );
+                    } else {
+                        SDL_SetRelativeMouseMode(
+                            SDL_TRUE
+                        );
+                    }
+                }
 
                 if (key == SDLK_ESCAPE) {
                     if (
-                        gameState == GameState::GAME ||
-                        gameState == GameState::CLEAR
+                        gameState ==
+                            GameState::GAME ||
+                        gameState ==
+                            GameState::CLEAR
                     ) {
-                        gameState = GameState::HOME;
+                        returnHome();
+
+                        gameState =
+                            GameState::HOME;
                     } else {
                         running = false;
                     }
                 }
 
                 if (
-                    gameState == GameState::CLEAR &&
+                    gameState ==
+                        GameState::CLEAR &&
                     key == SDLK_RETURN
                 ) {
-                    generateMaze();
-                    gameState = GameState::GAME;
+                    startGame();
+
+                    gameState =
+                        GameState::GAME;
                 }
             }
         }
 
-        if (gameState == GameState::GAME) {
+        if (
+            gameState ==
+                GameState::GAME &&
+            !mapOpen
+        ) {
             updatePlayer(deltaTime);
 
             if (playerReachedGoal()) {
-                gameState = GameState::CLEAR;
+                SDL_SetRelativeMouseMode(
+                    SDL_FALSE
+                );
+
+                gameState =
+                    GameState::CLEAR;
             }
         }
 
-        if (gameState == GameState::HOME) {
+        if (
+            gameState ==
+            GameState::HOME
+        ) {
             drawHome(
                 renderer,
                 titleFont,
@@ -1124,12 +1379,28 @@ int main() {
                 settingsButton,
                 rulesButton
             );
-        } else if (gameState == GameState::GAME) {
+        } else if (
+            gameState ==
+                GameState::GAME &&
+            mapOpen
+        ) {
+            drawFullMap(
+                renderer,
+                titleFont,
+                smallFont
+            );
+        } else if (
+            gameState ==
+            GameState::GAME
+        ) {
             drawGame(
                 renderer,
                 smallFont
             );
-        } else if (gameState == GameState::CLEAR) {
+        } else if (
+            gameState ==
+            GameState::CLEAR
+        ) {
             drawClear(
                 renderer,
                 titleFont,
@@ -1139,6 +1410,10 @@ int main() {
 
         SDL_RenderPresent(renderer);
     }
+
+    SDL_SetRelativeMouseMode(
+        SDL_FALSE
+    );
 
     TTF_CloseFont(smallFont);
     TTF_CloseFont(buttonFont);
