@@ -5,17 +5,22 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 const int SCREEN_WIDTH = 1000;
 const int SCREEN_HEIGHT = 700;
 
-const int MAZE_WIDTH = 31;
-const int MAZE_HEIGHT = 21;
+// 必ず奇数にする
+const int MAZE_WIDTH = 61;
+const int MAZE_HEIGHT = 61;
+
+const int TILE_SIZE = 42;
 
 enum class GameState {
     HOME,
-    MAZE
+    MAZE,
+    CLEAR
 };
 
 struct Button {
@@ -29,6 +34,12 @@ std::vector<std::vector<int>> maze(
 );
 
 std::mt19937 randomEngine(std::random_device{}());
+
+int playerX = 1;
+int playerY = 1;
+
+int goalX = MAZE_WIDTH - 2;
+int goalY = MAZE_HEIGHT - 2;
 
 bool isInsideMaze(int x, int y) {
     return x > 0 &&
@@ -83,8 +94,14 @@ void generateMaze() {
 
     generateMazeFrom(1, 1);
 
-    maze[1][1] = 0;
-    maze[MAZE_HEIGHT - 2][MAZE_WIDTH - 2] = 0;
+    playerX = 1;
+    playerY = 1;
+
+    goalX = MAZE_WIDTH - 2;
+    goalY = MAZE_HEIGHT - 2;
+
+    maze[playerY][playerX] = 0;
+    maze[goalY][goalX] = 0;
 }
 
 TTF_Font* openFont(int size) {
@@ -110,10 +127,9 @@ void drawText(
     TTF_Font* font,
     const std::string& text,
     int centerX,
-    int centerY
+    int centerY,
+    SDL_Color color = {255, 255, 255, 255}
 ) {
-    SDL_Color color = {255, 255, 255, 255};
-
     SDL_Surface* surface = TTF_RenderUTF8_Blended(
         font,
         text.c_str(),
@@ -135,11 +151,6 @@ void drawText(
     );
 
     if (texture == nullptr) {
-        std::cerr
-            << "文字テクスチャの作成に失敗: "
-            << SDL_GetError()
-            << std::endl;
-
         SDL_FreeSurface(surface);
         return;
     }
@@ -162,6 +173,18 @@ void drawText(
     SDL_FreeSurface(surface);
 }
 
+bool isButtonClicked(
+    const Button& button,
+    int mouseX,
+    int mouseY
+) {
+    return
+        mouseX >= button.rect.x &&
+        mouseX < button.rect.x + button.rect.w &&
+        mouseY >= button.rect.y &&
+        mouseY < button.rect.y + button.rect.h;
+}
+
 void drawButton(
     SDL_Renderer* renderer,
     TTF_Font* font,
@@ -172,18 +195,18 @@ void drawButton(
 
     SDL_GetMouseState(&mouseX, &mouseY);
 
-    bool hovered =
-        mouseX >= button.rect.x &&
-        mouseX <= button.rect.x + button.rect.w &&
-        mouseY >= button.rect.y &&
-        mouseY <= button.rect.y + button.rect.h;
+    bool hovered = isButtonClicked(
+        button,
+        mouseX,
+        mouseY
+    );
 
     if (hovered) {
         SDL_SetRenderDrawColor(
             renderer,
             80,
-            100,
-            145,
+            105,
+            155,
             255
         );
     } else {
@@ -196,7 +219,10 @@ void drawButton(
         );
     }
 
-    SDL_RenderFillRect(renderer, &button.rect);
+    SDL_RenderFillRect(
+        renderer,
+        &button.rect
+    );
 
     SDL_SetRenderDrawColor(
         renderer,
@@ -206,7 +232,10 @@ void drawButton(
         255
     );
 
-    SDL_RenderDrawRect(renderer, &button.rect);
+    SDL_RenderDrawRect(
+        renderer,
+        &button.rect
+    );
 
     drawText(
         renderer,
@@ -215,18 +244,6 @@ void drawButton(
         button.rect.x + button.rect.w / 2,
         button.rect.y + button.rect.h / 2
     );
-}
-
-bool isButtonClicked(
-    const Button& button,
-    int mouseX,
-    int mouseY
-) {
-    return
-        mouseX >= button.rect.x &&
-        mouseX <= button.rect.x + button.rect.w &&
-        mouseY >= button.rect.y &&
-        mouseY <= button.rect.y + button.rect.h;
 }
 
 void drawHome(
@@ -274,105 +291,280 @@ void drawHome(
     );
 }
 
+void movePlayer(int moveX, int moveY) {
+    int nextX = playerX + moveX;
+    int nextY = playerY + moveY;
+
+    if (
+        nextX < 0 ||
+        nextX >= MAZE_WIDTH ||
+        nextY < 0 ||
+        nextY >= MAZE_HEIGHT
+    ) {
+        return;
+    }
+
+    if (maze[nextY][nextX] == 1) {
+        return;
+    }
+
+    playerX = nextX;
+    playerY = nextY;
+}
+
 void drawMaze(
     SDL_Renderer* renderer,
     TTF_Font* smallFont
 ) {
     SDL_SetRenderDrawColor(
         renderer,
-        20,
-        20,
-        25,
+        15,
+        18,
+        24,
         255
     );
 
     SDL_RenderClear(renderer);
 
-    int cellWidth = SCREEN_WIDTH / MAZE_WIDTH;
-    int cellHeight = 600 / MAZE_HEIGHT;
+    // プレイヤーを常に中央へ固定
+    const int playerScreenX = SCREEN_WIDTH / 2;
+    const int playerScreenY = SCREEN_HEIGHT / 2;
 
-    int cellSize = std::min(cellWidth, cellHeight);
+    // 迷路側をずらす量
+    int cameraOffsetX =
+        playerScreenX - playerX * TILE_SIZE;
 
-    int mazePixelWidth = MAZE_WIDTH * cellSize;
-    int mazePixelHeight = MAZE_HEIGHT * cellSize;
-
-    int offsetX =
-        (SCREEN_WIDTH - mazePixelWidth) / 2;
-
-    int offsetY =
-        (SCREEN_HEIGHT - mazePixelHeight) / 2 + 25;
+    int cameraOffsetY =
+        playerScreenY - playerY * TILE_SIZE;
 
     for (int y = 0; y < MAZE_HEIGHT; y++) {
         for (int x = 0; x < MAZE_WIDTH; x++) {
+            int screenX =
+                cameraOffsetX + x * TILE_SIZE;
+
+            int screenY =
+                cameraOffsetY + y * TILE_SIZE;
+
+            // 画面外のマスは描画しない
+            if (
+                screenX + TILE_SIZE < 0 ||
+                screenX >= SCREEN_WIDTH ||
+                screenY + TILE_SIZE < 0 ||
+                screenY >= SCREEN_HEIGHT
+            ) {
+                continue;
+            }
+
             SDL_Rect cell = {
-                offsetX + x * cellSize,
-                offsetY + y * cellSize,
-                cellSize,
-                cellSize
+                screenX,
+                screenY,
+                TILE_SIZE,
+                TILE_SIZE
             };
 
             if (maze[y][x] == 1) {
                 SDL_SetRenderDrawColor(
                     renderer,
-                    70,
-                    80,
-                    100,
+                    50,
+                    58,
+                    72,
                     255
+                );
+
+                SDL_RenderFillRect(
+                    renderer,
+                    &cell
+                );
+
+                SDL_SetRenderDrawColor(
+                    renderer,
+                    85,
+                    95,
+                    115,
+                    255
+                );
+
+                SDL_RenderDrawRect(
+                    renderer,
+                    &cell
                 );
             } else {
                 SDL_SetRenderDrawColor(
                     renderer,
-                    220,
-                    220,
-                    220,
+                    200,
+                    200,
+                    195,
                     255
+                );
+
+                SDL_RenderFillRect(
+                    renderer,
+                    &cell
+                );
+
+                SDL_SetRenderDrawColor(
+                    renderer,
+                    175,
+                    175,
+                    170,
+                    255
+                );
+
+                SDL_RenderDrawRect(
+                    renderer,
+                    &cell
                 );
             }
 
-            SDL_RenderFillRect(renderer, &cell);
+            if (x == goalX && y == goalY) {
+                SDL_Rect goalRect = {
+                    screenX + 7,
+                    screenY + 7,
+                    TILE_SIZE - 14,
+                    TILE_SIZE - 14
+                };
+
+                SDL_SetRenderDrawColor(
+                    renderer,
+                    60,
+                    220,
+                    100,
+                    255
+                );
+
+                SDL_RenderFillRect(
+                    renderer,
+                    &goalRect
+                );
+            }
         }
     }
 
-    SDL_Rect startCell = {
-        offsetX + cellSize,
-        offsetY + cellSize,
-        cellSize,
-        cellSize
-    };
-
-    SDL_SetRenderDrawColor(
-        renderer,
-        50,
-        130,
-        255,
-        255
-    );
-
-    SDL_RenderFillRect(renderer, &startCell);
-
-    SDL_Rect goalCell = {
-        offsetX + (MAZE_WIDTH - 2) * cellSize,
-        offsetY + (MAZE_HEIGHT - 2) * cellSize,
-        cellSize,
-        cellSize
+    // プレイヤーは画面中央に固定
+    SDL_Rect playerRect = {
+        playerScreenX - TILE_SIZE / 2 + 6,
+        playerScreenY - TILE_SIZE / 2 + 6,
+        TILE_SIZE - 12,
+        TILE_SIZE - 12
     };
 
     SDL_SetRenderDrawColor(
         renderer,
         60,
-        210,
-        100,
+        140,
+        255,
         255
     );
 
-    SDL_RenderFillRect(renderer, &goalCell);
+    SDL_RenderFillRect(
+        renderer,
+        &playerRect
+    );
+
+    SDL_SetRenderDrawColor(
+        renderer,
+        230,
+        240,
+        255,
+        255
+    );
+
+    SDL_RenderDrawRect(
+        renderer,
+        &playerRect
+    );
+
+    // 中央を分かりやすくする小さい印
+    SDL_SetRenderDrawColor(
+        renderer,
+        255,
+        255,
+        255,
+        255
+    );
+
+    SDL_RenderDrawLine(
+        renderer,
+        playerScreenX - 6,
+        playerScreenY,
+        playerScreenX + 6,
+        playerScreenY
+    );
+
+    SDL_RenderDrawLine(
+        renderer,
+        playerScreenX,
+        playerScreenY - 6,
+        playerScreenX,
+        playerScreenY + 6
+    );
+
+    SDL_SetRenderDrawColor(
+        renderer,
+        10,
+        12,
+        18,
+        230
+    );
+
+    SDL_Rect topBar = {
+        0,
+        0,
+        SCREEN_WIDTH,
+        60
+    };
+
+    SDL_RenderFillRect(
+        renderer,
+        &topBar
+    );
 
     drawText(
         renderer,
         smallFont,
-        "青：スタート　緑：ゴール　Esc：ホームへ戻る",
+        "WASD・矢印キー：移動　緑：ゴール　Esc：ホーム",
         SCREEN_WIDTH / 2,
-        35
+        30
+    );
+}
+
+void drawClear(
+    SDL_Renderer* renderer,
+    TTF_Font* titleFont,
+    TTF_Font* buttonFont
+) {
+    SDL_SetRenderDrawColor(
+        renderer,
+        15,
+        20,
+        32,
+        255
+    );
+
+    SDL_RenderClear(renderer);
+
+    SDL_Color green = {
+        80,
+        230,
+        120,
+        255
+    };
+
+    drawText(
+        renderer,
+        titleFont,
+        "迷路クリア！",
+        SCREEN_WIDTH / 2,
+        270,
+        green
+    );
+
+    drawText(
+        renderer,
+        buttonFont,
+        "Enter：もう一度　Esc：ホーム",
+        SCREEN_WIDTH / 2,
+        390
     );
 }
 
@@ -413,7 +605,6 @@ int main() {
 
         TTF_Quit();
         SDL_Quit();
-
         return 1;
     }
 
@@ -441,7 +632,6 @@ int main() {
         SDL_DestroyWindow(window);
         TTF_Quit();
         SDL_Quit();
-
         return 1;
     }
 
@@ -464,7 +654,6 @@ int main() {
 
         TTF_Quit();
         SDL_Quit();
-
         return 1;
     }
 
@@ -496,17 +685,6 @@ int main() {
             }
 
             if (
-                event.type == SDL_KEYDOWN &&
-                event.key.keysym.sym == SDLK_ESCAPE
-            ) {
-                if (gameState == GameState::MAZE) {
-                    gameState = GameState::HOME;
-                } else {
-                    running = false;
-                }
-            }
-
-            if (
                 event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
                 gameState == GameState::HOME
@@ -525,6 +703,66 @@ int main() {
                     gameState = GameState::MAZE;
                 }
             }
+
+            if (event.type == SDL_KEYDOWN) {
+                SDL_Keycode key = event.key.keysym.sym;
+
+                if (key == SDLK_ESCAPE) {
+                    if (
+                        gameState == GameState::MAZE ||
+                        gameState == GameState::CLEAR
+                    ) {
+                        gameState = GameState::HOME;
+                    } else {
+                        running = false;
+                    }
+                }
+
+                if (gameState == GameState::MAZE) {
+                    if (
+                        key == SDLK_w ||
+                        key == SDLK_UP
+                    ) {
+                        movePlayer(0, -1);
+                    }
+
+                    if (
+                        key == SDLK_s ||
+                        key == SDLK_DOWN
+                    ) {
+                        movePlayer(0, 1);
+                    }
+
+                    if (
+                        key == SDLK_a ||
+                        key == SDLK_LEFT
+                    ) {
+                        movePlayer(-1, 0);
+                    }
+
+                    if (
+                        key == SDLK_d ||
+                        key == SDLK_RIGHT
+                    ) {
+                        movePlayer(1, 0);
+                    }
+
+                    if (
+                        playerX == goalX &&
+                        playerY == goalY
+                    ) {
+                        gameState = GameState::CLEAR;
+                    }
+                }
+
+                if (
+                    gameState == GameState::CLEAR &&
+                    key == SDLK_RETURN
+                ) {
+                    generateMaze();
+                    gameState = GameState::MAZE;
+                }
+            }
         }
 
         if (gameState == GameState::HOME) {
@@ -536,12 +774,16 @@ int main() {
                 settingsButton,
                 rulesButton
             );
-        }
-
-        if (gameState == GameState::MAZE) {
+        } else if (gameState == GameState::MAZE) {
             drawMaze(
                 renderer,
                 smallFont
+            );
+        } else if (gameState == GameState::CLEAR) {
+            drawClear(
+                renderer,
+                titleFont,
+                buttonFont
             );
         }
 
