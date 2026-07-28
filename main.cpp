@@ -18,6 +18,7 @@ const int MAZE_HEIGHT = 17;
 const int MAP_VIEW_RADIUS = 5;
 
 const double PI = 3.14159265358979323846;
+const char* BUILD_VERSION = "FINAL-V3-2026-07-29";
 
 enum class GameState {
     HOME,
@@ -62,6 +63,16 @@ double playerX = 1.5;
 double playerY = 1.5;
 double playerAngle = 0.0;
 double cameraPitch = 0.0;
+
+// 視点を滑らかにするための回転速度
+double cameraYawVelocity = 0.0;
+double cameraPitchVelocity = 0.0;
+
+// モバイル右側スワイプ用
+bool mobileLookActive = false;
+SDL_FingerID mobileLookFingerId = 0;
+float mobileLookLastX = 0.0f;
+float mobileLookLastY = 0.0f;
 
 int goalX = MAZE_WIDTH - 2;
 int goalY = MAZE_HEIGHT - 2;
@@ -294,6 +305,8 @@ void generateMaze() {
     playerY = 1.5;
     playerAngle = 0.0;
     cameraPitch = 0.0;
+    cameraYawVelocity = 0.0;
+    cameraPitchVelocity = 0.0;
 
     goalX = MAZE_WIDTH - 2;
     goalY = MAZE_HEIGHT - 2;
@@ -399,7 +412,7 @@ void updatePlayer(double deltaTime) {
 
     bool keyboardRun =
         keys[SDL_SCANCODE_W] &&
-        keys[SDL_SCANCODE_UP];
+        keys[SDL_SCANCODE_Q];
 
     bool forwardPressed =
         keyboardForward ||
@@ -466,18 +479,47 @@ void updatePlayer(double deltaTime) {
     }
 }
 
-void updateMouseLook(int movementX, int movementY) {
+void addLookInput(double movementX, double movementY, double scale = 1.0) {
     if (
         mapOpen ||
-        overlayState != OverlayState::NONE ||
-        controlMode != ControlMode::PC
+        overlayState != OverlayState::NONE
     ) {
         return;
     }
 
-    playerAngle += movementX * mouseSensitivity;
+    cameraYawVelocity +=
+        movementX * mouseSensitivity * scale;
 
-    cameraPitch -= movementY * 0.55;
+    cameraPitchVelocity -=
+        movementY * 0.55 * scale;
+}
+
+void updateSmoothCamera(double deltaTime) {
+    if (
+        mapOpen ||
+        overlayState != OverlayState::NONE
+    ) {
+        cameraYawVelocity = 0.0;
+        cameraPitchVelocity = 0.0;
+        return;
+    }
+
+    // フレームレートが変わっても同じ滑らかさになる減衰
+    double damping = std::pow(0.0008, deltaTime);
+
+    playerAngle += cameraYawVelocity;
+    cameraPitch += cameraPitchVelocity;
+
+    cameraYawVelocity *= damping;
+    cameraPitchVelocity *= damping;
+
+    if (std::abs(cameraYawVelocity) < 0.00001) {
+        cameraYawVelocity = 0.0;
+    }
+
+    if (std::abs(cameraPitchVelocity) < 0.01) {
+        cameraPitchVelocity = 0.0;
+    }
 
     cameraPitch = std::clamp(
         cameraPitch,
@@ -1028,7 +1070,7 @@ void drawGame(
         drawText(
             renderer,
             smallFont,
-            "W・↑：前進　W＋↑：走る　↓：後退　A/D・←/→：左右　T：地図　I：一時停止",
+            "W・↑：前進　W＋Q：走る　↓：後退　A/D・←/→：左右　T：地図　I：一時停止",
             SCREEN_WIDTH / 2,
             SCREEN_HEIGHT - 23
         );
@@ -1363,6 +1405,7 @@ void toggleControlMode() {
     mobileLeftHeld = false;
     mobileRightHeld = false;
     mobileRunning = false;
+    mobileLookActive = false;
 }
 
 void drawSettings(
@@ -1564,6 +1607,15 @@ void drawHome(
         140
     );
 
+    drawText(
+        renderer,
+        buttonFont,
+        "FINAL V3：W＋Qダッシュ／右半分スワイプ視点",
+        SCREEN_WIDTH / 2,
+        205,
+        {150, 210, 255, 255}
+    );
+
     drawButton(renderer, buttonFont, startButton);
     drawButton(renderer, buttonFont, settingsButton);
     drawButton(renderer, buttonFont, rulesButton);
@@ -1654,6 +1706,9 @@ void returnHome() {
     mobileLeftHeld = false;
     mobileRightHeld = false;
     mobileRunning = false;
+    mobileLookActive = false;
+    cameraYawVelocity = 0.0;
+    cameraPitchVelocity = 0.0;
 
     SDL_SetRelativeMouseMode(SDL_FALSE);
 }
@@ -1667,6 +1722,9 @@ void openPauseMenu() {
     mobileLeftHeld = false;
     mobileRightHeld = false;
     mobileRunning = false;
+    mobileLookActive = false;
+    cameraYawVelocity = 0.0;
+    cameraPitchVelocity = 0.0;
 
     SDL_SetRelativeMouseMode(SDL_FALSE);
 }
@@ -1749,7 +1807,7 @@ int main() {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "3D Maze",
+        "3D Maze - FINAL V3",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         SCREEN_WIDTH,
@@ -1938,9 +1996,11 @@ int main() {
 
             if (
                 event.type == SDL_MOUSEMOTION &&
-                gameState == GameState::GAME
+                event.motion.which != SDL_TOUCH_MOUSEID &&
+                gameState == GameState::GAME &&
+                controlMode == ControlMode::PC
             ) {
-                updateMouseLook(
+                addLookInput(
                     event.motion.xrel,
                     event.motion.yrel
                 );
@@ -1953,6 +2013,7 @@ int main() {
 
             if (
                 event.type == SDL_MOUSEBUTTONDOWN &&
+                event.button.which != SDL_TOUCH_MOUSEID &&
                 event.button.button == SDL_BUTTON_LEFT
             ) {
                 pointerX = event.button.x;
@@ -1962,6 +2023,7 @@ int main() {
 
             if (
                 event.type == SDL_MOUSEBUTTONUP &&
+                event.button.which != SDL_TOUCH_MOUSEID &&
                 event.button.button == SDL_BUTTON_LEFT
             ) {
                 pointerX = event.button.x;
@@ -1977,6 +2039,48 @@ int main() {
                     fingerToScreenY(event.tfinger.y);
 
                 pointerDown = true;
+
+                // モバイルでは画面右側をスワイプして視点操作
+                if (
+                    controlMode == ControlMode::MOBILE &&
+                    gameState == GameState::GAME &&
+                    overlayState == OverlayState::NONE &&
+                    !mapOpen &&
+                    event.tfinger.x >= 0.50f &&
+                    !pointInside(
+                        mobilePauseButton.rect,
+                        pointerX,
+                        pointerY
+                    )
+                ) {
+                    mobileLookActive = true;
+                    mobileLookFingerId = event.tfinger.fingerId;
+                    mobileLookLastX = event.tfinger.x;
+                    mobileLookLastY = event.tfinger.y;
+                    pointerDown = false;
+                }
+            }
+
+            if (
+                event.type == SDL_FINGERMOTION &&
+                mobileLookActive &&
+                event.tfinger.fingerId == mobileLookFingerId &&
+                controlMode == ControlMode::MOBILE &&
+                gameState == GameState::GAME &&
+                overlayState == OverlayState::NONE &&
+                !mapOpen
+            ) {
+                float deltaX = event.tfinger.x - mobileLookLastX;
+                float deltaY = event.tfinger.y - mobileLookLastY;
+
+                mobileLookLastX = event.tfinger.x;
+                mobileLookLastY = event.tfinger.y;
+
+                addLookInput(
+                    deltaX * SCREEN_WIDTH,
+                    deltaY * SCREEN_HEIGHT,
+                    1.15
+                );
             }
 
             if (event.type == SDL_FINGERUP) {
@@ -1987,72 +2091,20 @@ int main() {
                     fingerToScreenY(event.tfinger.y);
 
                 pointerUp = true;
+
+                if (
+                    mobileLookActive &&
+                    event.tfinger.fingerId == mobileLookFingerId
+                ) {
+                    mobileLookActive = false;
+                    pointerUp = false;
+                }
             }
 
             if (pointerDown) {
-                if (gameState == GameState::HOME) {
-                    if (pointInside(startButton.rect, pointerX, pointerY)) {
-                        startGame();
-                        gameState = GameState::GAME;
-                    } else if (
-                        pointInside(
-                            homeSettingsButton.rect,
-                            pointerX,
-                            pointerY
-                        )
-                    ) {
-                        settingsReturnTarget =
-                            SettingsReturnTarget::HOME;
-
-                        overlayState =
-                            OverlayState::SETTINGS;
-                    }
-                } else if (
-                    gameState == GameState::GAME &&
-                    overlayState == OverlayState::PAUSE
-                ) {
-                    if (
-                        pointInside(
-                            pauseSettingsButton.rect,
-                            pointerX,
-                            pointerY
-                        )
-                    ) {
-                        settingsReturnTarget =
-                            SettingsReturnTarget::PAUSE;
-
-                        overlayState =
-                            OverlayState::SETTINGS;
-                    } else if (
-                        pointInside(
-                            pauseSaveButton.rect,
-                            pointerX,
-                            pointerY
-                        )
-                    ) {
-                        saveGame();
-                    } else if (
-                        pointInside(
-                            pauseHomeButton.rect,
-                            pointerX,
-                            pointerY
-                        )
-                    ) {
-                        returnHome();
-                        gameState = GameState::HOME;
-                    } else if (
-                        controlMode == ControlMode::MOBILE &&
-                        pointInside(
-                            mobilePauseButton.rect,
-                            pointerX,
-                            pointerY
-                        )
-                    ) {
-                        closePauseMenu();
-                    }
-                } else if (
-                    overlayState == OverlayState::SETTINGS
-                ) {
+                // 設定画面が開いている間は、ホーム画面の裏側にある
+                // スタートボタンを絶対に判定しない。
+                if (overlayState == OverlayState::SETTINGS) {
                     if (
                         pointInside(
                             sensitivityButton.rect,
@@ -2088,22 +2140,72 @@ int main() {
                             settingsReturnTarget ==
                             SettingsReturnTarget::HOME
                         ) {
-                            overlayState =
-                                OverlayState::NONE;
+                            overlayState = OverlayState::NONE;
                         } else {
-                            overlayState =
-                                OverlayState::PAUSE;
+                            overlayState = OverlayState::PAUSE;
                         }
 
                         setMouseCaptureForGameplay();
+                    }
+                } else if (gameState == GameState::HOME) {
+                    if (pointInside(startButton.rect, pointerX, pointerY)) {
+                        startGame();
+                        gameState = GameState::GAME;
+                    } else if (
+                        pointInside(
+                            homeSettingsButton.rect,
+                            pointerX,
+                            pointerY
+                        )
+                    ) {
+                        settingsReturnTarget = SettingsReturnTarget::HOME;
+                        overlayState = OverlayState::SETTINGS;
+                    }
+                } else if (
+                    gameState == GameState::GAME &&
+                    overlayState == OverlayState::PAUSE
+                ) {
+                    if (
+                        pointInside(
+                            pauseSettingsButton.rect,
+                            pointerX,
+                            pointerY
+                        )
+                    ) {
+                        settingsReturnTarget = SettingsReturnTarget::PAUSE;
+                        overlayState = OverlayState::SETTINGS;
+                    } else if (
+                        pointInside(
+                            pauseSaveButton.rect,
+                            pointerX,
+                            pointerY
+                        )
+                    ) {
+                        saveGame();
+                    } else if (
+                        pointInside(
+                            pauseHomeButton.rect,
+                            pointerX,
+                            pointerY
+                        )
+                    ) {
+                        returnHome();
+                        gameState = GameState::HOME;
+                    } else if (
+                        controlMode == ControlMode::MOBILE &&
+                        pointInside(
+                            mobilePauseButton.rect,
+                            pointerX,
+                            pointerY
+                        )
+                    ) {
+                        closePauseMenu();
                     }
                 } else if (
                     gameState == GameState::GAME &&
                     overlayState == OverlayState::NONE
                 ) {
-                    if (
-                        controlMode == ControlMode::MOBILE
-                    ) {
+                    if (controlMode == ControlMode::MOBILE) {
                         if (
                             pointInside(
                                 mobilePauseButton.rect,
@@ -2221,6 +2323,7 @@ int main() {
                 OverlayState::NONE &&
             !mapOpen
         ) {
+            updateSmoothCamera(deltaTime);
             updatePlayer(deltaTime);
 
             if (playerReachedGoal()) {
