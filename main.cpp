@@ -14,13 +14,13 @@
 const int SCREEN_WIDTH = 1000;
 const int SCREEN_HEIGHT = 700;
 
-const int MAZE_CELLS = 6;
+const int MAZE_CELLS = 8;
 const int MAZE_WIDTH = MAZE_CELLS * 2 + 1;
 const int MAZE_HEIGHT = MAZE_CELLS * 2 + 1;
 const int MAP_VIEW_RADIUS = 5;
 
 const double PI = 3.14159265358979323846;
-const char* BUILD_VERSION = "FINAL-V3-2026-07-29";
+const char* BUILD_VERSION = "MAZE-TRAPS-V5-2026-07-29";
 
 enum class GameState {
     HOME,
@@ -77,7 +77,45 @@ double enemyAngle = 0.0;
 int enemyWanderTargetX = -1;
 int enemyWanderTargetY = -1;
 Uint32 enemyWanderRetargetAt = 0;
+int enemyHealth = 2;
+bool enemyAlive = true;
 
+struct PatrolEnemy {
+    double x = 0.0;
+    double y = 0.0;
+    double startX = 0.0;
+    double startY = 0.0;
+    double endX = 0.0;
+    double endY = 0.0;
+    double speed = 1.55;
+    int direction = 1;
+    bool vertical = false;
+};
+
+struct FloorTrap {
+    double x = 0.0;
+    double y = 0.0;
+    bool usedByPlayer = false;
+    bool usedByEnemy = false;
+};
+
+enum class ItemEffect { SPEED_UP, SPEED_DOWN, DAMAGE, HEAL };
+struct RandomItem {
+    double x = 0.0;
+    double y = 0.0;
+    ItemEffect effect = ItemEffect::SPEED_UP;
+    bool available = true;
+};
+
+std::vector<PatrolEnemy> patrolEnemies;
+std::vector<FloorTrap> floorTraps;
+std::vector<RandomItem> randomItems;
+
+double jumpHeight = 0.0;
+double jumpVelocity = 0.0;
+bool playerOnGround = true;
+Uint32 speedEffectUntil = 0;
+double speedEffectMultiplier = 1.0;
 
 double playerX = 1.5;
 double playerY = 1.5;
@@ -347,6 +385,16 @@ void generateMaze() {
     enemyWanderTargetX = -1;
     enemyWanderTargetY = -1;
     enemyWanderRetargetAt = 0;
+    enemyHealth = 2;
+    enemyAlive = true;
+    patrolEnemies.clear();
+    floorTraps.clear();
+    randomItems.clear();
+    jumpHeight = 0.0;
+    jumpVelocity = 0.0;
+    playerOnGround = true;
+    speedEffectMultiplier = 1.0;
+    speedEffectUntil = 0;
 
     goalX = MAZE_WIDTH - 2;
     goalY = MAZE_HEIGHT - 2;
@@ -369,6 +417,69 @@ void generateMaze() {
     playerHasKey = false;
     actionMessage.clear();
     actionMessageUntil = 0;
+
+    // 直線往復型ロボットを2体配置する。
+    auto findPatrol = [&](bool vertical) -> PatrolEnemy {
+        PatrolEnemy result;
+        result.vertical = vertical;
+        int bestLength = 0;
+        for (int y = 1; y < MAZE_HEIGHT - 1; ++y) {
+            for (int x = 1; x < MAZE_WIDTH - 1; ++x) {
+                if (maze[y][x] != 0) continue;
+                int ex = x, ey = y;
+                if (vertical) {
+                    while (ey + 1 < MAZE_HEIGHT - 1 && maze[ey + 1][x] == 0) ++ey;
+                    int len = ey - y;
+                    if (len > bestLength) {
+                        bestLength = len;
+                        result.startX = result.endX = x + 0.5;
+                        result.startY = y + 0.5;
+                        result.endY = ey + 0.5;
+                    }
+                } else {
+                    while (ex + 1 < MAZE_WIDTH - 1 && maze[y][ex + 1] == 0) ++ex;
+                    int len = ex - x;
+                    if (len > bestLength) {
+                        bestLength = len;
+                        result.startY = result.endY = y + 0.5;
+                        result.startX = x + 0.5;
+                        result.endX = ex + 0.5;
+                    }
+                }
+            }
+        }
+        result.x = result.startX;
+        result.y = result.startY;
+        return result;
+    };
+    patrolEnemies.push_back(findPatrol(true));
+    patrolEnemies.push_back(findPatrol(false));
+
+    // 通路に床トラップを生成（スタート・ゴール・鍵の近くは避ける）。
+    std::vector<std::pair<int,int>> openCells;
+    for (int y = 1; y < MAZE_HEIGHT - 1; ++y) {
+        for (int x = 1; x < MAZE_WIDTH - 1; ++x) {
+            if (maze[y][x] != 0) continue;
+            if (std::hypot(x - 1.0, y - 1.0) < 2.5) continue;
+            if (std::hypot(x - goalX, y - goalY) < 2.0) continue;
+            if (std::hypot(x + 0.5 - keyX, y + 0.5 - keyY) < 1.5) continue;
+            openCells.push_back({x,y});
+        }
+    }
+    std::shuffle(openCells.begin(), openCells.end(), randomEngine);
+    int trapCount = std::min(7, static_cast<int>(openCells.size()));
+    for (int i = 0; i < trapCount; ++i) {
+        floorTraps.push_back({openCells[i].first + 0.5, openCells[i].second + 0.5, false, false});
+    }
+
+    // 低確率のランダムアイテム。今回は迷路ごとに0～2個。
+    std::uniform_int_distribution<int> itemCountRoll(0, 9);
+    int itemCount = itemCountRoll(randomEngine) < 3 ? 2 : (itemCountRoll(randomEngine) < 5 ? 1 : 0);
+    std::uniform_int_distribution<int> effectRoll(0, 3);
+    for (int i = 0; i < itemCount && trapCount + i < static_cast<int>(openCells.size()); ++i) {
+        auto [ix, iy] = openCells[trapCount + i];
+        randomItems.push_back({ix + 0.5, iy + 0.5, static_cast<ItemEffect>(effectRoll(randomEngine)), true});
+    }
 
     score = 0;
     visited[1][1] = true;
@@ -456,7 +567,22 @@ void updatePlayer(double deltaTime) {
     if (mapOpen || overlayState != OverlayState::NONE) return;
 
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
-    playerCrouching = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
+    playerCrouching = (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]) && playerOnGround;
+
+    if (!playerOnGround) {
+        jumpVelocity -= 7.8 * deltaTime;
+        jumpHeight += jumpVelocity * deltaTime;
+        if (jumpHeight <= 0.0) {
+            jumpHeight = 0.0;
+            jumpVelocity = 0.0;
+            playerOnGround = true;
+        }
+    }
+
+    if (speedEffectUntil != 0 && SDL_GetTicks() >= speedEffectUntil) {
+        speedEffectUntil = 0;
+        speedEffectMultiplier = 1.0;
+    }
 
     bool forwardPressed = keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP] || mobileUpHeld;
     bool backwardPressed = keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN] || mobileDownHeld;
@@ -464,7 +590,7 @@ void updatePlayer(double deltaTime) {
     bool rightPressed = keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT] || mobileRightHeld;
 
     bool ctrlHeld = keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_RCTRL];
-    bool runningForward = !playerCrouching &&
+    bool runningForward = !playerCrouching && playerOnGround &&
         (((keys[SDL_SCANCODE_UP] && ctrlHeld) ||
           (keys[SDL_SCANCODE_W] && keys[SDL_SCANCODE_Q])) || mobileRunning);
 
@@ -475,7 +601,8 @@ void updatePlayer(double deltaTime) {
     localForward /= length;
     localRight /= length;
 
-    double speed = playerCrouching ? 1.08 : (runningForward && localForward > 0.0 ? 3.45 : 1.85);
+    double speed = playerCrouching ? 0.95 : (runningForward && localForward > 0.0 ? 3.25 : 1.72);
+    speed *= speedEffectMultiplier;
     double forwardX = std::cos(playerAngle);
     double forwardY = std::sin(playerAngle);
     double rightX = -std::sin(playerAngle);
@@ -486,6 +613,13 @@ void updatePlayer(double deltaTime) {
         (forwardX * localForward + rightX * localRight) * movement,
         (forwardY * localForward + rightY * localRight) * movement
     );
+}
+
+void startPlayerJump() {
+    if (playerOnGround && !playerCrouching && overlayState == OverlayState::NONE && !mapOpen) {
+        playerOnGround = false;
+        jumpVelocity = 3.15;
+    }
 }
 
 void addLookInput(double movementX, double movementY, double scale = 1.0) {
@@ -549,7 +683,7 @@ int getHorizonY() {
     int horizonY =
         SCREEN_HEIGHT / 2 +
         static_cast<int>(cameraPitch) +
-        (playerCrouching ? 42 : 0);
+        (playerCrouching ? -46 : 0) + static_cast<int>(jumpHeight * 58.0);
 
     return std::clamp(
         horizonY,
@@ -888,6 +1022,7 @@ void moveEnemyTowardCell(int targetX, int targetY, double deltaTime) {
 }
 
 void updateEnemy(double deltaTime) {
+    if (!enemyAlive) return;
     if (enemyHasLineOfSightToPlayer()) {
         moveEnemyTowardCell(static_cast<int>(playerX), static_cast<int>(playerY), deltaTime);
         return;
@@ -907,11 +1042,41 @@ void updateEnemy(double deltaTime) {
 }
 
 bool enemyTouchedPlayer() {
-    return std::hypot(enemyX - playerX, enemyY - playerY) < 0.48;
+    return enemyAlive && std::hypot(enemyX - playerX, enemyY - playerY) < 0.48;
+}
+
+void drawSpriteAt(SDL_Renderer* renderer, double worldX, double worldY, double scale, Uint8 red, Uint8 green, Uint8 blue) {
+    if (enemyTexture == nullptr) return;
+    const double fieldOfView = PI / 3.0;
+    double directionX = std::cos(playerAngle), directionY = std::sin(playerAngle);
+    double planeLength = std::tan(fieldOfView / 2.0);
+    double planeX = -directionY * planeLength, planeY = directionX * planeLength;
+    double spriteX = worldX - playerX, spriteY = worldY - playerY;
+    double determinant = planeX * directionY - directionX * planeY;
+    if (std::abs(determinant) < 0.00001) return;
+    double inverseDeterminant = 1.0 / determinant;
+    double transformX = inverseDeterminant * (directionY * spriteX - directionX * spriteY);
+    double transformY = inverseDeterminant * (-planeY * spriteX + planeX * spriteY);
+    if (transformY <= 0.05) return;
+    int horizonY = getHorizonY();
+    int spriteScreenX = static_cast<int>((SCREEN_WIDTH / 2.0) * (1.0 + transformX / transformY));
+    int spriteHeight = std::abs(static_cast<int>(SCREEN_HEIGHT / transformY * scale));
+    int spriteWidth = static_cast<int>(spriteHeight * (enemyTextureWidth / static_cast<double>(enemyTextureHeight)));
+    int startY = horizonY - spriteHeight / 2;
+    int startX = spriteScreenX - spriteWidth / 2;
+    SDL_SetTextureColorMod(enemyTexture, red, green, blue);
+    for (int stripe = std::max(0, startX); stripe < std::min(SCREEN_WIDTH, startX + spriteWidth); ++stripe) {
+        if (transformY >= depthBuffer[stripe]) continue;
+        int textureX = (stripe - startX) * enemyTextureWidth / std::max(1, spriteWidth);
+        SDL_Rect source = {std::clamp(textureX, 0, enemyTextureWidth - 1), 0, 1, enemyTextureHeight};
+        SDL_Rect destination = {stripe, startY, 1, spriteHeight};
+        SDL_RenderCopy(renderer, enemyTexture, &source, &destination);
+    }
+    SDL_SetTextureColorMod(enemyTexture, 255, 255, 255);
 }
 
 void drawEnemy(SDL_Renderer* renderer) {
-    if (enemyTexture == nullptr) return;
+    if (!enemyAlive || enemyTexture == nullptr) return;
 
     const double fieldOfView = PI / 3.0;
     double directionX = std::cos(playerAngle);
@@ -927,7 +1092,7 @@ void drawEnemy(SDL_Renderer* renderer) {
     double transformY = inverseDeterminant * (-planeY * spriteX + planeX * spriteY);
     if (transformY <= 0.05) return;
 
-    int horizonY = SCREEN_HEIGHT / 2 + static_cast<int>(cameraPitch);
+    int horizonY = getHorizonY();
     int spriteScreenX = static_cast<int>((SCREEN_WIDTH / 2.0) * (1.0 + transformX / transformY));
     int spriteHeight = std::abs(static_cast<int>(SCREEN_HEIGHT / transformY * 0.92));
     int spriteWidth = static_cast<int>(spriteHeight * (enemyTextureWidth / static_cast<double>(enemyTextureHeight)));
@@ -1041,6 +1206,107 @@ void drawGameOver(SDL_Renderer* renderer, TTF_Font* titleFont, TTF_Font* smallFo
     SDL_RenderClear(renderer);
     drawText(renderer, titleFont, "ゲームオーバー", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 - 45, {255, 90, 90, 255});
     drawText(renderer, smallFont, "ロボットに捕まった！ Enterでやり直し", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 35);
+}
+
+void updatePatrolEnemies(double deltaTime) {
+    for (auto& robot : patrolEnemies) {
+        double targetX = robot.direction > 0 ? robot.endX : robot.startX;
+        double targetY = robot.direction > 0 ? robot.endY : robot.startY;
+        double dx = targetX - robot.x, dy = targetY - robot.y;
+        double distance = std::hypot(dx, dy);
+        if (distance < 0.08) { robot.direction *= -1; continue; }
+        robot.x += dx / distance * robot.speed * deltaTime;
+        robot.y += dy / distance * robot.speed * deltaTime;
+    }
+}
+
+void updateTrapsAndItems() {
+    Uint32 now = SDL_GetTicks();
+    for (auto& trap : floorTraps) {
+        if (!trap.usedByPlayer && jumpHeight < 0.22 && std::hypot(playerX - trap.x, playerY - trap.y) < 0.34) {
+            trap.usedByPlayer = true;
+            if (now >= playerDamageCooldownUntil) {
+                playerHearts--;
+                playerDamageCooldownUntil = now + 2000;
+                showActionMessage("トラップ！ ハートが1つ減った");
+            }
+        }
+        if (enemyAlive && !trap.usedByEnemy && std::hypot(enemyX - trap.x, enemyY - trap.y) < 0.34) {
+            trap.usedByEnemy = true;
+            enemyHealth--;
+            if (enemyHealth <= 0) {
+                enemyAlive = false;
+                showActionMessage("追跡ロボットがトラップで停止した！");
+            }
+        }
+    }
+    for (auto& item : randomItems) {
+        if (!item.available || std::hypot(playerX - item.x, playerY - item.y) >= 0.40) continue;
+        item.available = false;
+        switch (item.effect) {
+            case ItemEffect::SPEED_UP:
+                speedEffectMultiplier = 1.45; speedEffectUntil = now + 8000;
+                showActionMessage("アイテム：8秒間スピードアップ！"); break;
+            case ItemEffect::SPEED_DOWN:
+                speedEffectMultiplier = 0.62; speedEffectUntil = now + 7000;
+                showActionMessage("アイテム：7秒間スピードダウン…"); break;
+            case ItemEffect::DAMAGE:
+                if (now >= playerDamageCooldownUntil) { playerHearts--; playerDamageCooldownUntil = now + 2000; }
+                showActionMessage("アイテムが爆発！ 1ダメージ"); break;
+            case ItemEffect::HEAL:
+                playerHearts = std::min(3, playerHearts + 1);
+                showActionMessage("アイテム：ハートを1回復！"); break;
+        }
+    }
+}
+
+bool patrolEnemyTouchedPlayer() {
+    for (const auto& robot : patrolEnemies) {
+        if (std::hypot(robot.x - playerX, robot.y - playerY) < 0.46) return true;
+    }
+    return false;
+}
+
+void projectFloorMarker(SDL_Renderer* renderer, double worldX, double worldY, SDL_Color color, double sizeScale) {
+    const double fov = PI / 3.0;
+    double dx = worldX - playerX, dy = worldY - playerY;
+    double forward = dx * std::cos(playerAngle) + dy * std::sin(playerAngle);
+    double side = -dx * std::sin(playerAngle) + dy * std::cos(playerAngle);
+    if (forward <= 0.08) return;
+    int sx = static_cast<int>(SCREEN_WIDTH / 2.0 + (side / forward) * (SCREEN_WIDTH / (2.0 * std::tan(fov/2.0))));
+    int horizon = getHorizonY();
+    int sy = static_cast<int>(horizon + SCREEN_HEIGHT * 0.44 / forward);
+    int size = std::clamp(static_cast<int>(65.0 * sizeScale / forward), 3, 70);
+    if (sx < -size || sx >= SCREEN_WIDTH + size || sy < 0 || sy >= SCREEN_HEIGHT) return;
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+    SDL_Rect r = {sx-size/2, sy-size/5, size, std::max(3,size/3)};
+    SDL_RenderFillRect(renderer, &r);
+}
+
+void drawWorldObjects(SDL_Renderer* renderer) {
+    for (const auto& trap : floorTraps) {
+        SDL_Color c = trap.usedByPlayer ? SDL_Color{85,85,85,150} : SDL_Color{230,65,55,220};
+        projectFloorMarker(renderer, trap.x, trap.y, c, 1.0);
+    }
+    for (const auto& item : randomItems) if (item.available)
+        projectFloorMarker(renderer, item.x, item.y, {100,235,255,235}, 0.8);
+
+    // ゴールは大きな緑色のゲートとして表示。
+    const double fov = PI / 3.0;
+    double dx = goalX + 0.5 - playerX, dy = goalY + 0.5 - playerY;
+    double forward = dx*std::cos(playerAngle)+dy*std::sin(playerAngle);
+    double side = -dx*std::sin(playerAngle)+dy*std::cos(playerAngle);
+    if (forward > 0.1) {
+        int sx = static_cast<int>(SCREEN_WIDTH/2.0 + (side/forward)*(SCREEN_WIDTH/(2.0*std::tan(fov/2.0))));
+        int h = std::clamp(static_cast<int>(430.0/forward), 20, 420);
+        int w = std::max(12, h/3);
+        int y = getHorizonY()-h/2;
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 50,255,120,110);
+        SDL_Rect gate={sx-w/2,y,w,h}; SDL_RenderFillRect(renderer,&gate);
+        SDL_SetRenderDrawColor(renderer, 170,255,200,240); SDL_RenderDrawRect(renderer,&gate);
+    }
 }
 
 void drawNaturalGroundLight(SDL_Renderer* renderer) {
@@ -1233,7 +1499,11 @@ void drawGame(
 ) {
     draw3DView(renderer);
     drawNaturalGroundLight(renderer);
+    drawWorldObjects(renderer);
     drawEnemy(renderer);
+    for (const auto& patrol : patrolEnemies) {
+        drawSpriteAt(renderer, patrol.x, patrol.y, 0.82, patrol.vertical ? 255 : 150, patrol.vertical ? 155 : 220, 255);
+    }
     drawKeySprite(renderer);
     drawCrosshair(renderer);
     drawScore(renderer, smallFont);
@@ -1447,8 +1717,11 @@ void drawLocalMap(
         SDL_RenderFillRect(renderer, &marker);
     };
 
-    drawMapMarker(enemyX, enemyY, {230, 55, 55, 255}, 16);
+    if (enemyAlive) drawMapMarker(enemyX, enemyY, {230, 55, 55, 255}, 16);
+    for (const auto& patrol : patrolEnemies) drawMapMarker(patrol.x, patrol.y, patrol.vertical ? SDL_Color{255,130,60,255} : SDL_Color{190,80,255,255}, 14);
     if (keyAvailable) drawMapMarker(keyX, keyY, {255, 205, 35, 255}, 14);
+    for (const auto& trap : floorTraps) if (!trap.usedByPlayer) drawMapMarker(trap.x, trap.y, {230,70,70,255}, 8);
+    for (const auto& item : randomItems) if (item.available) drawMapMarker(item.x, item.y, {80,230,255,255}, 9);
 
     int playerCenterX =
         offsetX +
@@ -1839,7 +2112,7 @@ void drawHome(
     drawText(
         renderer,
         buttonFont,
-        "6×6 ROBOT：白レンガ／追跡ロボット",
+        "8×8：3種ロボット／トラップ／ランダムアイテム",
         SCREEN_WIDTH / 2,
         205,
         {150, 210, 255, 255}
@@ -2043,7 +2316,7 @@ int main() {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "3D Maze - 6x6 ROBOT",
+        "3D Maze - TRAPS V5",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         SCREEN_WIDTH,
@@ -2552,6 +2825,10 @@ int main() {
                 SDL_Keycode key =
                     event.key.keysym.sym;
 
+                if (gameState == GameState::GAME && key == SDLK_SPACE) {
+                    startPlayerJump();
+                }
+
                 if (
                     gameState == GameState::GAME &&
                     key == SDLK_i
@@ -2605,7 +2882,14 @@ int main() {
                 enemyUpdateAccumulator = 0.0;
             }
 
-            if (enemyTouchedPlayer() && SDL_GetTicks() >= playerDamageCooldownUntil) {
+            updatePatrolEnemies(deltaTime);
+            updateTrapsAndItems();
+            if (playerHearts <= 0) {
+                SDL_SetRelativeMouseMode(SDL_FALSE);
+                gameState = GameState::GAME_OVER;
+            }
+
+            if (gameState == GameState::GAME && (enemyTouchedPlayer() || patrolEnemyTouchedPlayer()) && SDL_GetTicks() >= playerDamageCooldownUntil) {
                 playerHearts--;
                 playerDamageCooldownUntil = SDL_GetTicks() + 2000;
                 showActionMessage("ロボットにぶつかった！ ハートが1つ減った");
