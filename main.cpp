@@ -1,5 +1,6 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_image.h>
 
 #include <algorithm>
 #include <cmath>
@@ -13,8 +14,9 @@
 const int SCREEN_WIDTH = 1000;
 const int SCREEN_HEIGHT = 700;
 
-const int MAZE_WIDTH = 17;
-const int MAZE_HEIGHT = 17;
+const int MAZE_CELLS = 6;
+const int MAZE_WIDTH = MAZE_CELLS * 2 + 1;
+const int MAZE_HEIGHT = MAZE_CELLS * 2 + 1;
 const int MAP_VIEW_RADIUS = 5;
 
 const double PI = 3.14159265358979323846;
@@ -23,7 +25,8 @@ const char* BUILD_VERSION = "FINAL-V3-2026-07-29";
 enum class GameState {
     HOME,
     GAME,
-    CLEAR
+    CLEAR,
+    GAME_OVER
 };
 
 enum class OverlayState {
@@ -58,6 +61,19 @@ std::vector<std::vector<bool>> visited(
 );
 
 std::mt19937 randomEngine(std::random_device{}());
+
+SDL_Texture* wallTexture = nullptr;
+SDL_Texture* enemyTexture = nullptr;
+int wallTextureWidth = 0;
+int wallTextureHeight = 0;
+int enemyTextureWidth = 0;
+int enemyTextureHeight = 0;
+std::vector<double> depthBuffer(SCREEN_WIDTH, 1e30);
+
+double enemyX = 0.0;
+double enemyY = 0.0;
+double enemySpeed = 1.15;
+
 
 double playerX = 1.5;
 double playerY = 1.5;
@@ -313,6 +329,10 @@ void generateMaze() {
 
     maze[1][1] = 0;
     maze[goalY][goalX] = 0;
+
+    // 敵はスタートからなるべく遠い通路に配置
+    enemyX = goalX + 0.5;
+    enemyY = goalY + 0.5;
 
     score = 0;
     visited[1][1] = true;
@@ -735,25 +755,165 @@ void draw3DView(SDL_Renderer* renderer) {
             125
         );
 
-        SDL_SetRenderDrawColor(
-            renderer,
-            brightness,
-            brightness,
-            std::min(
-                255,
-                brightness + 9
-            ),
-            255
-        );
+        depthBuffer[screenX] = wallDistance;
 
-        SDL_RenderDrawLine(
-            renderer,
-            screenX,
-            wallTop,
-            screenX,
-            wallBottom
-        );
+        if (wallTexture != nullptr && wallTextureWidth > 0) {
+            double wallHitX;
+            if (wallSide == 0) {
+                wallHitX = playerY + wallDistance * rayDirectionY;
+            } else {
+                wallHitX = playerX + wallDistance * rayDirectionX;
+            }
+            wallHitX -= std::floor(wallHitX);
+
+            int textureX = static_cast<int>(wallHitX * wallTextureWidth);
+            if ((wallSide == 0 && rayDirectionX > 0.0) ||
+                (wallSide == 1 && rayDirectionY < 0.0)) {
+                textureX = wallTextureWidth - textureX - 1;
+            }
+            textureX = std::clamp(textureX, 0, wallTextureWidth - 1);
+
+            SDL_Rect source = {textureX, 0, 1, wallTextureHeight};
+            SDL_Rect destination = {screenX, wallTop, 1, wallBottom - wallTop + 1};
+            SDL_SetTextureColorMod(
+                wallTexture,
+                static_cast<Uint8>(std::clamp(brightness * 2, 20, 255)),
+                static_cast<Uint8>(std::clamp(brightness * 2, 20, 255)),
+                static_cast<Uint8>(std::clamp(brightness * 2 + 5, 20, 255))
+            );
+            SDL_RenderCopy(renderer, wallTexture, &source, &destination);
+        } else {
+            SDL_SetRenderDrawColor(
+                renderer,
+                brightness,
+                brightness,
+                std::min(255, brightness + 9),
+                255
+            );
+            SDL_RenderDrawLine(renderer, screenX, wallTop, screenX, wallBottom);
+        }
     }
+}
+
+
+bool enemyCanMoveTo(double x, double y) {
+    const double radius = 0.16;
+    const double checks[4][2] = {
+        {x - radius, y - radius}, {x + radius, y - radius},
+        {x - radius, y + radius}, {x + radius, y + radius}
+    };
+    for (const auto& point : checks) {
+        int cellX = static_cast<int>(point[0]);
+        int cellY = static_cast<int>(point[1]);
+        if (cellX < 0 || cellX >= MAZE_WIDTH || cellY < 0 || cellY >= MAZE_HEIGHT ||
+            maze[cellY][cellX] == 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void updateEnemy(double deltaTime) {
+    int startX = static_cast<int>(enemyX);
+    int startY = static_cast<int>(enemyY);
+    int targetX = static_cast<int>(playerX);
+    int targetY = static_cast<int>(playerY);
+
+    std::vector<std::vector<int>> previous(MAZE_HEIGHT, std::vector<int>(MAZE_WIDTH, -1));
+    std::vector<std::pair<int,int>> queue;
+    queue.push_back({startX, startY});
+    previous[startY][startX] = startY * MAZE_WIDTH + startX;
+
+    const int dx[4] = {1, -1, 0, 0};
+    const int dy[4] = {0, 0, 1, -1};
+    for (size_t index = 0; index < queue.size(); ++index) {
+        auto [x, y] = queue[index];
+        if (x == targetX && y == targetY) break;
+        for (int direction = 0; direction < 4; ++direction) {
+            int nx = x + dx[direction];
+            int ny = y + dy[direction];
+            if (nx < 0 || nx >= MAZE_WIDTH || ny < 0 || ny >= MAZE_HEIGHT) continue;
+            if (maze[ny][nx] == 1 || previous[ny][nx] != -1) continue;
+            previous[ny][nx] = y * MAZE_WIDTH + x;
+            queue.push_back({nx, ny});
+        }
+    }
+
+    if (previous[targetY][targetX] == -1) return;
+
+    int pathX = targetX;
+    int pathY = targetY;
+    while (true) {
+        int value = previous[pathY][pathX];
+        int parentX = value % MAZE_WIDTH;
+        int parentY = value / MAZE_WIDTH;
+        if (parentX == startX && parentY == startY) break;
+        if (parentX == pathX && parentY == pathY) break;
+        pathX = parentX;
+        pathY = parentY;
+    }
+
+    double destinationX = pathX + 0.5;
+    double destinationY = pathY + 0.5;
+    double directionX = destinationX - enemyX;
+    double directionY = destinationY - enemyY;
+    double distance = std::hypot(directionX, directionY);
+    if (distance > 0.001) {
+        directionX /= distance;
+        directionY /= distance;
+        double movement = enemySpeed * deltaTime;
+        double nextX = enemyX + directionX * movement;
+        double nextY = enemyY + directionY * movement;
+        if (enemyCanMoveTo(nextX, enemyY)) enemyX = nextX;
+        if (enemyCanMoveTo(enemyX, nextY)) enemyY = nextY;
+    }
+}
+
+bool enemyTouchedPlayer() {
+    return std::hypot(enemyX - playerX, enemyY - playerY) < 0.48;
+}
+
+void drawEnemy(SDL_Renderer* renderer) {
+    if (enemyTexture == nullptr) return;
+
+    const double fieldOfView = PI / 3.0;
+    double directionX = std::cos(playerAngle);
+    double directionY = std::sin(playerAngle);
+    double planeLength = std::tan(fieldOfView / 2.0);
+    double planeX = -directionY * planeLength;
+    double planeY = directionX * planeLength;
+
+    double spriteX = enemyX - playerX;
+    double spriteY = enemyY - playerY;
+    double inverseDeterminant = 1.0 / (planeX * directionY - directionX * planeY);
+    double transformX = inverseDeterminant * (directionY * spriteX - directionX * spriteY);
+    double transformY = inverseDeterminant * (-planeY * spriteX + planeX * spriteY);
+    if (transformY <= 0.05) return;
+
+    int horizonY = SCREEN_HEIGHT / 2 + static_cast<int>(cameraPitch);
+    int spriteScreenX = static_cast<int>((SCREEN_WIDTH / 2.0) * (1.0 + transformX / transformY));
+    int spriteHeight = std::abs(static_cast<int>(SCREEN_HEIGHT / transformY * 0.92));
+    int spriteWidth = static_cast<int>(spriteHeight * (enemyTextureWidth / static_cast<double>(enemyTextureHeight)));
+    int startY = horizonY - spriteHeight / 2;
+    int endY = horizonY + spriteHeight / 2;
+    int startX = spriteScreenX - spriteWidth / 2;
+    int endX = spriteScreenX + spriteWidth / 2;
+
+    for (int stripe = std::max(0, startX); stripe < std::min(SCREEN_WIDTH, endX); ++stripe) {
+        if (transformY >= depthBuffer[stripe]) continue;
+        int textureX = static_cast<int>((stripe - startX) * enemyTextureWidth / static_cast<double>(std::max(1, spriteWidth)));
+        textureX = std::clamp(textureX, 0, enemyTextureWidth - 1);
+        SDL_Rect source = {textureX, 0, 1, enemyTextureHeight};
+        SDL_Rect destination = {stripe, startY, 1, endY - startY};
+        SDL_RenderCopy(renderer, enemyTexture, &source, &destination);
+    }
+}
+
+void drawGameOver(SDL_Renderer* renderer, TTF_Font* titleFont, TTF_Font* smallFont) {
+    SDL_SetRenderDrawColor(renderer, 20, 24, 30, 255);
+    SDL_RenderClear(renderer);
+    drawText(renderer, titleFont, "ゲームオーバー", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 - 45, {255, 90, 90, 255});
+    drawText(renderer, smallFont, "ロボットに捕まった！ Enterでやり直し", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 35);
 }
 
 void drawNaturalGroundLight(SDL_Renderer* renderer) {
@@ -1027,6 +1187,7 @@ void drawGame(
 ) {
     draw3DView(renderer);
     drawNaturalGroundLight(renderer);
+    drawEnemy(renderer);
     drawCrosshair(renderer);
     drawScore(renderer, smallFont);
 
@@ -1610,7 +1771,7 @@ void drawHome(
     drawText(
         renderer,
         buttonFont,
-        "FINAL V3：W＋Qダッシュ／右半分スワイプ視点",
+        "6×6 ROBOT：白レンガ／追跡ロボット",
         SCREEN_WIDTH / 2,
         205,
         {150, 210, 255, 255}
@@ -1806,8 +1967,15 @@ int main() {
         return 1;
     }
 
+    if ((IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG) & (IMG_INIT_PNG | IMG_INIT_JPG)) == 0) {
+        std::cerr << "SDL_imageの初期化に失敗: " << IMG_GetError() << std::endl;
+        TTF_Quit();
+        SDL_Quit();
+        return 1;
+    }
+
     SDL_Window* window = SDL_CreateWindow(
-        "3D Maze - FINAL V3",
+        "3D Maze - 6x6 ROBOT",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         SCREEN_WIDTH,
@@ -1857,6 +2025,16 @@ int main() {
         renderer,
         SDL_BLENDMODE_BLEND
     );
+
+    wallTexture = IMG_LoadTexture(renderer, "wall.jpg");
+    enemyTexture = IMG_LoadTexture(renderer, "enemy.png");
+    if (wallTexture != nullptr) SDL_QueryTexture(wallTexture, nullptr, nullptr, &wallTextureWidth, &wallTextureHeight);
+    if (enemyTexture != nullptr) {
+        SDL_QueryTexture(enemyTexture, nullptr, nullptr, &enemyTextureWidth, &enemyTextureHeight);
+        SDL_SetTextureBlendMode(enemyTexture, SDL_BLENDMODE_BLEND);
+    }
+    if (wallTexture == nullptr) std::cerr << "wall.jpgを読み込めません: " << IMG_GetError() << std::endl;
+    if (enemyTexture == nullptr) std::cerr << "enemy.pngを読み込めません: " << IMG_GetError() << std::endl;
 
     TTF_Font* titleFont = openFont(50);
     TTF_Font* buttonFont = openFont(28);
@@ -2308,7 +2486,7 @@ int main() {
                 }
 
                 if (
-                    gameState == GameState::CLEAR &&
+                    (gameState == GameState::CLEAR || gameState == GameState::GAME_OVER) &&
                     key == SDLK_RETURN
                 ) {
                     startGame();
@@ -2325,8 +2503,12 @@ int main() {
         ) {
             updateSmoothCamera(deltaTime);
             updatePlayer(deltaTime);
+            updateEnemy(deltaTime);
 
-            if (playerReachedGoal()) {
+            if (enemyTouchedPlayer()) {
+                SDL_SetRelativeMouseMode(SDL_FALSE);
+                gameState = GameState::GAME_OVER;
+            } else if (playerReachedGoal()) {
                 SDL_SetRelativeMouseMode(
                     SDL_FALSE
                 );
@@ -2428,6 +2610,8 @@ int main() {
                 buttonFont,
                 smallFont
             );
+        } else if (gameState == GameState::GAME_OVER) {
+            drawGameOver(renderer, titleFont, smallFont);
         }
 
         SDL_RenderPresent(renderer);
@@ -2439,9 +2623,12 @@ int main() {
     TTF_CloseFont(buttonFont);
     TTF_CloseFont(titleFont);
 
+    if (enemyTexture != nullptr) SDL_DestroyTexture(enemyTexture);
+    if (wallTexture != nullptr) SDL_DestroyTexture(wallTexture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
 
+    IMG_Quit();
     TTF_Quit();
     SDL_Quit();
 
