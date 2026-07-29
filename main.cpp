@@ -72,7 +72,7 @@ std::vector<double> depthBuffer(SCREEN_WIDTH, 1e30);
 
 double enemyX = 0.0;
 double enemyY = 0.0;
-double enemySpeed = 1.15;
+double enemySpeed = 0.82;
 
 
 double playerX = 1.5;
@@ -95,7 +95,9 @@ int goalY = MAZE_HEIGHT - 2;
 int score = 0;
 
 double mouseSensitivity = 0.0025;
-int sensitivityLevel = 1;
+const double MIN_SENSITIVITY = 0.0008;
+const double MAX_SENSITIVITY = 0.0060;
+bool sensitivityDragging = false;
 
 int brightnessLevel = 1;
 double brightnessMultiplier = 1.0;
@@ -107,6 +109,14 @@ OverlayState overlayState = OverlayState::NONE;
 SettingsReturnTarget settingsReturnTarget = SettingsReturnTarget::HOME;
 
 Uint32 saveMessageUntil = 0;
+
+// 鍵とゴール操作
+double keyX = 0.0;
+double keyY = 0.0;
+bool keyAvailable = true;
+bool playerHasKey = false;
+Uint32 actionMessageUntil = 0;
+std::string actionMessage;
 
 bool mobileUpHeld = false;
 bool mobileDownHeld = false;
@@ -334,6 +344,18 @@ void generateMaze() {
     enemyX = goalX + 0.5;
     enemyY = goalY + 0.5;
 
+    // 鍵ゾーンはゴールとは別の奥まった通路に配置
+    int keyCellX = 1;
+    int keyCellY = goalY;
+    if (keyCellX == goalX && keyCellY == goalY) keyCellY = 1;
+    maze[keyCellY][keyCellX] = 0;
+    keyX = keyCellX + 0.5;
+    keyY = keyCellY + 0.5;
+    keyAvailable = true;
+    playerHasKey = false;
+    actionMessage.clear();
+    actionMessageUntil = 0;
+
     score = 0;
     visited[1][1] = true;
 
@@ -448,8 +470,8 @@ void updatePlayer(double deltaTime) {
     double rightX = -std::sin(playerAngle);
     double rightY = std::cos(playerAngle);
 
-    double forwardSpeed = runningForward ? 5.5 : 3.0;
-    double normalSpeed = 3.0;
+    double forwardSpeed = runningForward ? 4.45 : 2.35;
+    double normalSpeed = 2.35;
 
     if (forwardPressed) {
         double movement = forwardSpeed * deltaTime;
@@ -462,6 +484,7 @@ void updatePlayer(double deltaTime) {
 
     if (
         keys[SDL_SCANCODE_DOWN] ||
+        keys[SDL_SCANCODE_S] ||
         mobileDownHeld
     ) {
         double movement = normalSpeed * deltaTime;
@@ -612,7 +635,7 @@ void draw3DView(SDL_Renderer* renderer) {
     double planeX = -directionY * planeLength;
     double planeY = directionX * planeLength;
 
-    for (int screenX = 0; screenX < SCREEN_WIDTH; screenX += 2) {
+    for (int screenX = 0; screenX < SCREEN_WIDTH; screenX++) {
         double cameraX =
             2.0 *
             screenX /
@@ -756,8 +779,7 @@ void draw3DView(SDL_Renderer* renderer) {
         );
 
         depthBuffer[screenX] = wallDistance;
-        if (screenX + 1 < SCREEN_WIDTH) depthBuffer[screenX + 1] = wallDistance;
-
+        
         if (wallTexture != nullptr && wallTextureWidth > 0) {
             double wallHitX;
             if (wallSide == 0) {
@@ -775,7 +797,7 @@ void draw3DView(SDL_Renderer* renderer) {
             textureX = std::clamp(textureX, 0, wallTextureWidth - 1);
 
             SDL_Rect source = {textureX, 0, 1, wallTextureHeight};
-            SDL_Rect destination = {screenX, wallTop, std::min(2, SCREEN_WIDTH - screenX), wallBottom - wallTop + 1};
+            SDL_Rect destination = {screenX, wallTop, 1, wallBottom - wallTop + 1};
             SDL_SetTextureColorMod(
                 wallTexture,
                 static_cast<Uint8>(std::clamp(brightness * 2, 20, 255)),
@@ -791,7 +813,7 @@ void draw3DView(SDL_Renderer* renderer) {
                 std::min(255, brightness + 9),
                 255
             );
-            SDL_Rect wallColumn = {screenX, wallTop, std::min(2, SCREEN_WIDTH - screenX), wallBottom - wallTop + 1};
+            SDL_Rect wallColumn = {screenX, wallTop, 1, wallBottom - wallTop + 1};
             SDL_RenderFillRect(renderer, &wallColumn);
         }
     }
@@ -909,6 +931,96 @@ void drawEnemy(SDL_Renderer* renderer) {
         SDL_Rect destination = {stripe, startY, std::min(2, SCREEN_WIDTH - stripe), endY - startY};
         SDL_RenderCopy(renderer, enemyTexture, &source, &destination);
     }
+}
+
+
+bool hasClearLine(double fromX, double fromY, double toX, double toY) {
+    double dx = toX - fromX;
+    double dy = toY - fromY;
+    double distance = std::hypot(dx, dy);
+    if (distance < 0.001) return true;
+    int steps = std::max(1, static_cast<int>(distance / 0.05));
+    for (int i = 1; i < steps; ++i) {
+        double t = static_cast<double>(i) / steps;
+        int x = static_cast<int>(fromX + dx * t);
+        int y = static_cast<int>(fromY + dy * t);
+        if (x < 0 || x >= MAZE_WIDTH || y < 0 || y >= MAZE_HEIGHT || maze[y][x] == 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool lookingAt(double targetX, double targetY, double maxDistance, double maxAngle) {
+    double dx = targetX - playerX;
+    double dy = targetY - playerY;
+    double distance = std::hypot(dx, dy);
+    if (distance > maxDistance) return false;
+    double angle = std::atan2(dy, dx) - playerAngle;
+    while (angle > PI) angle -= 2.0 * PI;
+    while (angle < -PI) angle += 2.0 * PI;
+    return std::abs(angle) <= maxAngle && hasClearLine(playerX, playerY, targetX, targetY);
+}
+
+void showActionMessage(const std::string& text) {
+    actionMessage = text;
+    actionMessageUntil = SDL_GetTicks() + 1800;
+}
+
+bool tryPickUpKey() {
+    if (!keyAvailable) return false;
+    if (!lookingAt(keyX, keyY, 1.65, 0.22)) {
+        showActionMessage("鍵に近づいて、中央に合わせて左クリック");
+        return false;
+    }
+    keyAvailable = false;
+    playerHasKey = true;
+    showActionMessage("鍵を手に入れた！");
+    return true;
+}
+
+bool tryUseKeyAtGoal() {
+    double gx = goalX + 0.5;
+    double gy = goalY + 0.5;
+    if (!lookingAt(gx, gy, 1.8, 0.35)) {
+        showActionMessage("ゴールに近づいて右クリック");
+        return false;
+    }
+    if (!playerHasKey) {
+        showActionMessage("鍵がない！ 鍵ゾーンを探そう");
+        return false;
+    }
+    playerHasKey = false;
+    return true;
+}
+
+void drawKeySprite(SDL_Renderer* renderer) {
+    if (!keyAvailable) return;
+    double dx = keyX - playerX;
+    double dy = keyY - playerY;
+    double distance = std::hypot(dx, dy);
+    if (distance < 0.05 || !hasClearLine(playerX, playerY, keyX, keyY)) return;
+    double relativeAngle = std::atan2(dy, dx) - playerAngle;
+    while (relativeAngle > PI) relativeAngle -= 2.0 * PI;
+    while (relativeAngle < -PI) relativeAngle += 2.0 * PI;
+    const double fov = PI / 3.0;
+    if (std::abs(relativeAngle) > fov * 0.65) return;
+    int screenX = SCREEN_WIDTH / 2 + static_cast<int>(std::tan(relativeAngle) / std::tan(fov / 2.0) * SCREEN_WIDTH / 2.0);
+    int horizonY = getHorizonY();
+    int size = std::clamp(static_cast<int>(150.0 / distance), 18, 110);
+    int centerY = horizonY + static_cast<int>(SCREEN_HEIGHT / distance * 0.20);
+    if (screenX < 0 || screenX >= SCREEN_WIDTH || distance >= depthBuffer[std::clamp(screenX,0,SCREEN_WIDTH-1)]) return;
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 255, 202, 35, 230);
+    SDL_Rect ring = {screenX - size/2, centerY - size/3, size/2, size/2};
+    SDL_RenderDrawRect(renderer, &ring);
+    SDL_RenderDrawRect(renderer, &ring);
+    SDL_Rect shaft = {screenX - 2, centerY, size/2 + 6, std::max(5, size/8)};
+    SDL_RenderFillRect(renderer, &shaft);
+    SDL_Rect tooth1 = {screenX + size/3, centerY, std::max(4,size/10), size/4};
+    SDL_Rect tooth2 = {screenX + size/5, centerY, std::max(4,size/10), size/5};
+    SDL_RenderFillRect(renderer, &tooth1);
+    SDL_RenderFillRect(renderer, &tooth2);
 }
 
 void drawGameOver(SDL_Renderer* renderer, TTF_Font* titleFont, TTF_Font* smallFont) {
@@ -1109,8 +1221,15 @@ void drawGame(
     draw3DView(renderer);
     drawNaturalGroundLight(renderer);
     drawEnemy(renderer);
+    drawKeySprite(renderer);
     drawCrosshair(renderer);
     drawScore(renderer, smallFont);
+
+    drawText(renderer, smallFont, playerHasKey ? "鍵：あり" : "鍵：なし", 70, 38,
+             playerHasKey ? SDL_Color{255,215,70,255} : SDL_Color{220,220,220,255});
+    if (SDL_GetTicks() < actionMessageUntil) {
+        drawText(renderer, smallFont, actionMessage, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 55, {255,235,120,255});
+    }
 
     if (controlMode == ControlMode::MOBILE) {
         drawMobileControls(
@@ -1152,7 +1271,7 @@ void drawGame(
         drawText(
             renderer,
             smallFont,
-            "W・↑：前進　W＋Q：走る　↓：後退　A/D・←/→：左右　T：地図　I：一時停止",
+            "W・↑：前進　W＋Q：走る　S・↓：後退　左クリック：鍵　右クリック：ゴール　T：地図　I：一時停止",
             SCREEN_WIDTH / 2,
             SCREEN_HEIGHT - 23
         );
@@ -1420,28 +1539,19 @@ void saveGame() {
 }
 
 std::string sensitivityText() {
-    if (sensitivityLevel == 0) {
-        return "マウス感度：低";
-    }
-
-    if (sensitivityLevel == 1) {
-        return "マウス感度：普通";
-    }
-
-    return "マウス感度：高";
+    int percent = static_cast<int>(
+        (mouseSensitivity - MIN_SENSITIVITY) /
+        (MAX_SENSITIVITY - MIN_SENSITIVITY) * 100.0
+    );
+    percent = std::clamp(percent, 0, 100);
+    return "マウス感度：" + std::to_string(percent) + "%";
 }
 
-void changeSensitivity() {
-    sensitivityLevel =
-        (sensitivityLevel + 1) % 3;
-
-    if (sensitivityLevel == 0) {
-        mouseSensitivity = 0.0015;
-    } else if (sensitivityLevel == 1) {
-        mouseSensitivity = 0.0025;
-    } else {
-        mouseSensitivity = 0.0040;
-    }
+void setSensitivityFromPointer(int pointerX, const SDL_Rect& sliderTrack) {
+    double amount = static_cast<double>(pointerX - sliderTrack.x) / sliderTrack.w;
+    amount = std::clamp(amount, 0.0, 1.0);
+    mouseSensitivity = MIN_SENSITIVITY +
+        amount * (MAX_SENSITIVITY - MIN_SENSITIVITY);
 }
 
 std::string brightnessText() {
@@ -1518,20 +1628,26 @@ void drawSettings(
         120
     );
 
-    Button currentSensitivity = sensitivityButton;
-    currentSensitivity.text = sensitivityText();
-
     Button currentBrightness = brightnessButton;
     currentBrightness.text = brightnessText();
 
     Button currentControlMode = controlModeButton;
     currentControlMode.text = controlModeText();
 
-    drawButton(
-        renderer,
-        buttonFont,
-        currentSensitivity
-    );
+    drawText(renderer, buttonFont, sensitivityText(), SCREEN_WIDTH / 2, 205);
+
+    SDL_Rect sliderTrack = {350, 255, 300, 12};
+    SDL_SetRenderDrawColor(renderer, 70, 78, 92, 255);
+    SDL_RenderFillRect(renderer, &sliderTrack);
+    double sliderAmount = (mouseSensitivity - MIN_SENSITIVITY) /
+                          (MAX_SENSITIVITY - MIN_SENSITIVITY);
+    int knobX = sliderTrack.x + static_cast<int>(sliderTrack.w * sliderAmount);
+    SDL_Rect sliderFill = {sliderTrack.x, sliderTrack.y, knobX - sliderTrack.x, sliderTrack.h};
+    SDL_SetRenderDrawColor(renderer, 45, 145, 245, 255);
+    SDL_RenderFillRect(renderer, &sliderFill);
+    SDL_Rect knob = {knobX - 10, sliderTrack.y - 9, 20, 30};
+    SDL_SetRenderDrawColor(renderer, 235, 242, 255, 255);
+    SDL_RenderFillRect(renderer, &knob);
 
     drawButton(
         renderer,
@@ -2010,22 +2126,22 @@ int main() {
     };
 
     Button sensitivityButton = {
-        {325, 210, 350, 70},
+        {325, 225, 350, 75},
         "マウス感度"
     };
 
     Button brightnessButton = {
-        {325, 305, 350, 70},
+        {325, 330, 350, 70},
         "明るさ"
     };
 
     Button controlModeButton = {
-        {325, 400, 350, 70},
+        {325, 425, 350, 70},
         "操作方法"
     };
 
     Button settingsBackButton = {
-        {350, 510, 300, 65},
+        {350, 535, 300, 60},
         "戻る"
     };
 
@@ -2103,6 +2219,26 @@ int main() {
                     event.motion.xrel,
                     event.motion.yrel
                 );
+            }
+
+            if (event.type == SDL_MOUSEMOTION && sensitivityDragging &&
+                overlayState == OverlayState::SETTINGS) {
+                SDL_Rect sliderTrack = {350, 255, 300, 12};
+                setSensitivityFromPointer(event.motion.x, sliderTrack);
+            }
+
+            if (event.type == SDL_MOUSEBUTTONDOWN &&
+                event.button.which != SDL_TOUCH_MOUSEID &&
+                gameState == GameState::GAME &&
+                overlayState == OverlayState::NONE && !mapOpen) {
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    tryPickUpKey();
+                } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                    if (tryUseKeyAtGoal()) {
+                        SDL_SetRelativeMouseMode(SDL_FALSE);
+                        gameState = GameState::CLEAR;
+                    }
+                }
             }
 
             int pointerX = -1;
@@ -2211,7 +2347,9 @@ int main() {
                             pointerY
                         )
                     ) {
-                        changeSensitivity();
+                        SDL_Rect sliderTrack = {350, 255, 300, 12};
+                        setSensitivityFromPointer(pointerX, sliderTrack);
+                        sensitivityDragging = true;
                     } else if (
                         pointInside(
                             brightnessButton.rect,
@@ -2359,6 +2497,10 @@ int main() {
                 }
             }
 
+            if (pointerUp) {
+                sensitivityDragging = false;
+            }
+
             if (
                 pointerUp &&
                 controlMode == ControlMode::MOBILE
@@ -2435,13 +2577,6 @@ int main() {
             if (enemyTouchedPlayer()) {
                 SDL_SetRelativeMouseMode(SDL_FALSE);
                 gameState = GameState::GAME_OVER;
-            } else if (playerReachedGoal()) {
-                SDL_SetRelativeMouseMode(
-                    SDL_FALSE
-                );
-
-                gameState =
-                    GameState::CLEAR;
             }
         }
 
