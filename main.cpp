@@ -72,13 +72,20 @@ std::vector<double> depthBuffer(SCREEN_WIDTH, 1e30);
 
 double enemyX = 0.0;
 double enemyY = 0.0;
-double enemySpeed = 0.82;
+double enemySpeed = 0.62;
+double enemyAngle = 0.0;
+int enemyWanderTargetX = -1;
+int enemyWanderTargetY = -1;
+Uint32 enemyWanderRetargetAt = 0;
 
 
 double playerX = 1.5;
 double playerY = 1.5;
 double playerAngle = 0.0;
 double cameraPitch = 0.0;
+bool playerCrouching = false;
+int playerHearts = 3;
+Uint32 playerDamageCooldownUntil = 0;
 
 // 視点を滑らかにするための回転速度
 double cameraYawVelocity = 0.0;
@@ -94,9 +101,9 @@ int goalX = MAZE_WIDTH - 2;
 int goalY = MAZE_HEIGHT - 2;
 int score = 0;
 
-double mouseSensitivity = 0.0025;
-const double MIN_SENSITIVITY = 0.0008;
-const double MAX_SENSITIVITY = 0.0060;
+double mouseSensitivity = 0.0015;
+const double MIN_SENSITIVITY = 0.00035;
+const double MAX_SENSITIVITY = 0.0032;
 bool sensitivityDragging = false;
 
 int brightnessLevel = 1;
@@ -333,6 +340,13 @@ void generateMaze() {
     cameraPitch = 0.0;
     cameraYawVelocity = 0.0;
     cameraPitchVelocity = 0.0;
+    playerCrouching = false;
+    playerHearts = 3;
+    playerDamageCooldownUntil = 0;
+    enemyAngle = 0.0;
+    enemyWanderTargetX = -1;
+    enemyWanderTargetY = -1;
+    enemyWanderRetargetAt = 0;
 
     goalX = MAZE_WIDTH - 2;
     goalY = MAZE_HEIGHT - 2;
@@ -439,87 +453,39 @@ void tryMove(double moveX, double moveY) {
 }
 
 void updatePlayer(double deltaTime) {
-    if (
-        mapOpen ||
-        overlayState != OverlayState::NONE
-    ) {
-        return;
-    }
+    if (mapOpen || overlayState != OverlayState::NONE) return;
 
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    playerCrouching = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
 
-    bool keyboardForward =
-        keys[SDL_SCANCODE_W] ||
-        keys[SDL_SCANCODE_UP];
+    bool forwardPressed = keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP] || mobileUpHeld;
+    bool backwardPressed = keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN] || mobileDownHeld;
+    bool leftPressed = keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT] || mobileLeftHeld;
+    bool rightPressed = keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT] || mobileRightHeld;
 
-    bool keyboardRun =
-        keys[SDL_SCANCODE_W] &&
-        keys[SDL_SCANCODE_Q];
+    bool ctrlHeld = keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_RCTRL];
+    bool runningForward = !playerCrouching &&
+        (((keys[SDL_SCANCODE_UP] && ctrlHeld) ||
+          (keys[SDL_SCANCODE_W] && keys[SDL_SCANCODE_Q])) || mobileRunning);
 
-    bool forwardPressed =
-        keyboardForward ||
-        mobileUpHeld;
+    double localForward = (forwardPressed ? 1.0 : 0.0) - (backwardPressed ? 1.0 : 0.0);
+    double localRight = (rightPressed ? 1.0 : 0.0) - (leftPressed ? 1.0 : 0.0);
+    double length = std::hypot(localForward, localRight);
+    if (length < 0.001) return;
+    localForward /= length;
+    localRight /= length;
 
-    bool runningForward =
-        keyboardRun ||
-        mobileRunning;
-
+    double speed = playerCrouching ? 1.08 : (runningForward && localForward > 0.0 ? 3.45 : 1.85);
     double forwardX = std::cos(playerAngle);
     double forwardY = std::sin(playerAngle);
-
     double rightX = -std::sin(playerAngle);
     double rightY = std::cos(playerAngle);
+    double movement = speed * deltaTime;
 
-    double forwardSpeed = runningForward ? 4.45 : 2.35;
-    double normalSpeed = 2.35;
-
-    if (forwardPressed) {
-        double movement = forwardSpeed * deltaTime;
-
-        tryMove(
-            forwardX * movement,
-            forwardY * movement
-        );
-    }
-
-    if (
-        keys[SDL_SCANCODE_DOWN] ||
-        keys[SDL_SCANCODE_S] ||
-        mobileDownHeld
-    ) {
-        double movement = normalSpeed * deltaTime;
-
-        tryMove(
-            -forwardX * movement,
-            -forwardY * movement
-        );
-    }
-
-    if (
-        keys[SDL_SCANCODE_A] ||
-        keys[SDL_SCANCODE_LEFT] ||
-        mobileLeftHeld
-    ) {
-        double movement = normalSpeed * deltaTime;
-
-        tryMove(
-            -rightX * movement,
-            -rightY * movement
-        );
-    }
-
-    if (
-        keys[SDL_SCANCODE_D] ||
-        keys[SDL_SCANCODE_RIGHT] ||
-        mobileRightHeld
-    ) {
-        double movement = normalSpeed * deltaTime;
-
-        tryMove(
-            rightX * movement,
-            rightY * movement
-        );
-    }
+    tryMove(
+        (forwardX * localForward + rightX * localRight) * movement,
+        (forwardY * localForward + rightY * localRight) * movement
+    );
 }
 
 void addLookInput(double movementX, double movementY, double scale = 1.0) {
@@ -582,7 +548,8 @@ void updateSmoothCamera(double deltaTime) {
 int getHorizonY() {
     int horizonY =
         SCREEN_HEIGHT / 2 +
-        static_cast<int>(cameraPitch);
+        static_cast<int>(cameraPitch) +
+        (playerCrouching ? 42 : 0);
 
     return std::clamp(
         horizonY,
@@ -820,6 +787,8 @@ void draw3DView(SDL_Renderer* renderer) {
 }
 
 
+bool hasClearLine(double fromX, double fromY, double toX, double toY);
+
 bool enemyCanMoveTo(double x, double y) {
     const double radius = 0.16;
     const double checks[4][2] = {
@@ -837,60 +806,104 @@ bool enemyCanMoveTo(double x, double y) {
     return true;
 }
 
-void updateEnemy(double deltaTime) {
+bool enemyHasLineOfSightToPlayer() {
+    double dx = playerX - enemyX;
+    double dy = playerY - enemyY;
+    double distance = std::hypot(dx, dy);
+    if (distance < 0.001) return true;
+
+    // しゃがみ中は、ロボットから1マス以内なら見つからない。
+    if (playerCrouching && distance <= 1.0) return false;
+
+    double targetAngle = std::atan2(dy, dx);
+    double difference = targetAngle - enemyAngle;
+    while (difference > PI) difference -= 2.0 * PI;
+    while (difference < -PI) difference += 2.0 * PI;
+
+    // 約110度の視野。正面に入っていて、壁に遮られていない時だけ追跡。
+    if (std::abs(difference) > 55.0 * PI / 180.0) return false;
+    return hasClearLine(enemyX, enemyY, playerX, playerY);
+}
+
+std::pair<int,int> chooseWanderTarget() {
+    int cx = static_cast<int>(enemyX);
+    int cy = static_cast<int>(enemyY);
+    std::vector<std::pair<int,int>> choices;
+    const int dx[4] = {1,-1,0,0};
+    const int dy[4] = {0,0,1,-1};
+    for (int i=0;i<4;i++) {
+        int nx=cx+dx[i], ny=cy+dy[i];
+        if (nx>=0 && nx<MAZE_WIDTH && ny>=0 && ny<MAZE_HEIGHT && maze[ny][nx]==0)
+            choices.push_back({nx,ny});
+    }
+    if (choices.empty()) return {cx,cy};
+    std::uniform_int_distribution<int> pick(0, static_cast<int>(choices.size())-1);
+    return choices[pick(randomEngine)];
+}
+
+void moveEnemyTowardCell(int targetX, int targetY, double deltaTime) {
     int startX = static_cast<int>(enemyX);
     int startY = static_cast<int>(enemyY);
-    int targetX = static_cast<int>(playerX);
-    int targetY = static_cast<int>(playerY);
+    targetX = std::clamp(targetX, 0, MAZE_WIDTH-1);
+    targetY = std::clamp(targetY, 0, MAZE_HEIGHT-1);
 
     std::vector<std::vector<int>> previous(MAZE_HEIGHT, std::vector<int>(MAZE_WIDTH, -1));
-    std::vector<std::pair<int,int>> queue;
-    queue.push_back({startX, startY});
+    std::vector<std::pair<int,int>> queue{{startX,startY}};
     previous[startY][startX] = startY * MAZE_WIDTH + startX;
-
-    const int dx[4] = {1, -1, 0, 0};
-    const int dy[4] = {0, 0, 1, -1};
-    for (size_t index = 0; index < queue.size(); ++index) {
-        auto [x, y] = queue[index];
-        if (x == targetX && y == targetY) break;
-        for (int direction = 0; direction < 4; ++direction) {
-            int nx = x + dx[direction];
-            int ny = y + dy[direction];
-            if (nx < 0 || nx >= MAZE_WIDTH || ny < 0 || ny >= MAZE_HEIGHT) continue;
-            if (maze[ny][nx] == 1 || previous[ny][nx] != -1) continue;
-            previous[ny][nx] = y * MAZE_WIDTH + x;
-            queue.push_back({nx, ny});
+    const int dx[4] = {1,-1,0,0};
+    const int dy[4] = {0,0,1,-1};
+    for (size_t index=0; index<queue.size(); ++index) {
+        auto [x,y]=queue[index];
+        if (x==targetX && y==targetY) break;
+        for (int i=0;i<4;i++) {
+            int nx=x+dx[i], ny=y+dy[i];
+            if (nx<0||nx>=MAZE_WIDTH||ny<0||ny>=MAZE_HEIGHT) continue;
+            if (maze[ny][nx]==1 || previous[ny][nx]!=-1) continue;
+            previous[ny][nx]=y*MAZE_WIDTH+x;
+            queue.push_back({nx,ny});
         }
     }
-
     if (previous[targetY][targetX] == -1) return;
 
-    int pathX = targetX;
-    int pathY = targetY;
+    int pathX=targetX, pathY=targetY;
     while (true) {
-        int value = previous[pathY][pathX];
-        int parentX = value % MAZE_WIDTH;
-        int parentY = value / MAZE_WIDTH;
-        if (parentX == startX && parentY == startY) break;
-        if (parentX == pathX && parentY == pathY) break;
-        pathX = parentX;
-        pathY = parentY;
+        int value=previous[pathY][pathX];
+        int parentX=value%MAZE_WIDTH, parentY=value/MAZE_WIDTH;
+        if (parentX==startX && parentY==startY) break;
+        if (parentX==pathX && parentY==pathY) break;
+        pathX=parentX; pathY=parentY;
     }
 
-    double destinationX = pathX + 0.5;
-    double destinationY = pathY + 0.5;
-    double directionX = destinationX - enemyX;
-    double directionY = destinationY - enemyY;
-    double distance = std::hypot(directionX, directionY);
-    if (distance > 0.001) {
-        directionX /= distance;
-        directionY /= distance;
-        double movement = enemySpeed * deltaTime;
-        double nextX = enemyX + directionX * movement;
-        double nextY = enemyY + directionY * movement;
-        if (enemyCanMoveTo(nextX, enemyY)) enemyX = nextX;
-        if (enemyCanMoveTo(enemyX, nextY)) enemyY = nextY;
+    double destinationX=pathX+0.5, destinationY=pathY+0.5;
+    double directionX=destinationX-enemyX, directionY=destinationY-enemyY;
+    double distance=std::hypot(directionX,directionY);
+    if (distance <= 0.001) return;
+    directionX/=distance; directionY/=distance;
+    enemyAngle=std::atan2(directionY,directionX);
+    double movement=enemySpeed*deltaTime;
+    double nextX=enemyX+directionX*movement;
+    double nextY=enemyY+directionY*movement;
+    if (enemyCanMoveTo(nextX,enemyY)) enemyX=nextX;
+    if (enemyCanMoveTo(enemyX,nextY)) enemyY=nextY;
+}
+
+void updateEnemy(double deltaTime) {
+    if (enemyHasLineOfSightToPlayer()) {
+        moveEnemyTowardCell(static_cast<int>(playerX), static_cast<int>(playerY), deltaTime);
+        return;
     }
+
+    Uint32 now=SDL_GetTicks();
+    double targetDistance = enemyWanderTargetX >= 0
+        ? std::hypot((enemyWanderTargetX+0.5)-enemyX, (enemyWanderTargetY+0.5)-enemyY)
+        : 0.0;
+    if (enemyWanderTargetX < 0 || targetDistance < 0.20 || now >= enemyWanderRetargetAt) {
+        auto target=chooseWanderTarget();
+        enemyWanderTargetX=target.first;
+        enemyWanderTargetY=target.second;
+        enemyWanderRetargetAt=now+1800;
+    }
+    moveEnemyTowardCell(enemyWanderTargetX, enemyWanderTargetY, deltaTime);
 }
 
 bool enemyTouchedPlayer() {
@@ -1225,8 +1238,12 @@ void drawGame(
     drawCrosshair(renderer);
     drawScore(renderer, smallFont);
 
-    drawText(renderer, smallFont, playerHasKey ? "鍵：あり" : "鍵：なし", 70, 38,
+    drawText(renderer, smallFont, playerHasKey ? "鍵：あり" : "鍵：なし", 105, 88,
              playerHasKey ? SDL_Color{255,215,70,255} : SDL_Color{220,220,220,255});
+    std::string hearts;
+    for (int i = 0; i < 3; ++i) hearts += (i < playerHearts ? "♥ " : "♡ ");
+    drawText(renderer, smallFont, hearts, SCREEN_WIDTH - 100, 38,
+             playerDamageCooldownUntil > SDL_GetTicks() ? SDL_Color{255,150,150,255} : SDL_Color{255,70,85,255});
     if (SDL_GetTicks() < actionMessageUntil) {
         drawText(renderer, smallFont, actionMessage, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 55, {255,235,120,255});
     }
@@ -1271,7 +1288,7 @@ void drawGame(
         drawText(
             renderer,
             smallFont,
-            "W・↑：前進　W＋Q：走る　S・↓：後退　左クリック：鍵　右クリック：ゴール　T：地図　I：一時停止",
+            "W・↑：前進　↑＋Ctrl：走る　S・↓：後退　Shift：しゃがむ　A/D：横移動　T：地図",
             SCREEN_WIDTH / 2,
             SCREEN_HEIGHT - 23
         );
@@ -1419,6 +1436,20 @@ void drawLocalMap(
         }
     }
 
+    auto drawMapMarker = [&](double worldX, double worldY, SDL_Color color, int size) {
+        int relativeX = static_cast<int>(worldX) - playerCellX;
+        int relativeY = static_cast<int>(worldY) - playerCellY;
+        if (std::abs(relativeX) > MAP_VIEW_RADIUS || std::abs(relativeY) > MAP_VIEW_RADIUS) return;
+        int centerX = offsetX + (relativeX + MAP_VIEW_RADIUS) * tileSize + tileSize / 2;
+        int centerY = offsetY + (relativeY + MAP_VIEW_RADIUS) * tileSize + tileSize / 2;
+        SDL_Rect marker = {centerX - size/2, centerY - size/2, size, size};
+        SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+        SDL_RenderFillRect(renderer, &marker);
+    };
+
+    drawMapMarker(enemyX, enemyY, {230, 55, 55, 255}, 16);
+    if (keyAvailable) drawMapMarker(keyX, keyY, {255, 205, 35, 255}, 14);
+
     int playerCenterX =
         offsetX +
         MAP_VIEW_RADIUS *
@@ -1496,7 +1527,7 @@ void drawLocalMap(
     drawText(
         renderer,
         smallFont,
-        "青：自分　黄色：向き　緑：ゴール　スコア：" +
+        "青：自分　赤：敵　金：鍵　緑：ゴール　スコア：" +
             std::to_string(score),
         SCREEN_WIDTH / 2,
         SCREEN_HEIGHT - 23
@@ -2574,9 +2605,16 @@ int main() {
                 enemyUpdateAccumulator = 0.0;
             }
 
-            if (enemyTouchedPlayer()) {
-                SDL_SetRelativeMouseMode(SDL_FALSE);
-                gameState = GameState::GAME_OVER;
+            if (enemyTouchedPlayer() && SDL_GetTicks() >= playerDamageCooldownUntil) {
+                playerHearts--;
+                playerDamageCooldownUntil = SDL_GetTicks() + 2000;
+                showActionMessage("ロボットにぶつかった！ ハートが1つ減った");
+                // 連続接触を避けるため、少し後ろへ押し戻す。
+                tryMove(-std::cos(playerAngle) * 0.35, -std::sin(playerAngle) * 0.35);
+                if (playerHearts <= 0) {
+                    SDL_SetRelativeMouseMode(SDL_FALSE);
+                    gameState = GameState::GAME_OVER;
+                }
             }
         }
 
