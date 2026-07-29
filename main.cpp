@@ -612,7 +612,7 @@ void draw3DView(SDL_Renderer* renderer) {
     double planeX = -directionY * planeLength;
     double planeY = directionX * planeLength;
 
-    for (int screenX = 0; screenX < SCREEN_WIDTH; screenX++) {
+    for (int screenX = 0; screenX < SCREEN_WIDTH; screenX += 2) {
         double cameraX =
             2.0 *
             screenX /
@@ -756,6 +756,7 @@ void draw3DView(SDL_Renderer* renderer) {
         );
 
         depthBuffer[screenX] = wallDistance;
+        if (screenX + 1 < SCREEN_WIDTH) depthBuffer[screenX + 1] = wallDistance;
 
         if (wallTexture != nullptr && wallTextureWidth > 0) {
             double wallHitX;
@@ -774,7 +775,7 @@ void draw3DView(SDL_Renderer* renderer) {
             textureX = std::clamp(textureX, 0, wallTextureWidth - 1);
 
             SDL_Rect source = {textureX, 0, 1, wallTextureHeight};
-            SDL_Rect destination = {screenX, wallTop, 1, wallBottom - wallTop + 1};
+            SDL_Rect destination = {screenX, wallTop, std::min(2, SCREEN_WIDTH - screenX), wallBottom - wallTop + 1};
             SDL_SetTextureColorMod(
                 wallTexture,
                 static_cast<Uint8>(std::clamp(brightness * 2, 20, 255)),
@@ -790,7 +791,8 @@ void draw3DView(SDL_Renderer* renderer) {
                 std::min(255, brightness + 9),
                 255
             );
-            SDL_RenderDrawLine(renderer, screenX, wallTop, screenX, wallBottom);
+            SDL_Rect wallColumn = {screenX, wallTop, std::min(2, SCREEN_WIDTH - screenX), wallBottom - wallTop + 1};
+            SDL_RenderFillRect(renderer, &wallColumn);
         }
     }
 }
@@ -899,12 +901,12 @@ void drawEnemy(SDL_Renderer* renderer) {
     int startX = spriteScreenX - spriteWidth / 2;
     int endX = spriteScreenX + spriteWidth / 2;
 
-    for (int stripe = std::max(0, startX); stripe < std::min(SCREEN_WIDTH, endX); ++stripe) {
+    for (int stripe = std::max(0, startX); stripe < std::min(SCREEN_WIDTH, endX); stripe += 2) {
         if (transformY >= depthBuffer[stripe]) continue;
         int textureX = static_cast<int>((stripe - startX) * enemyTextureWidth / static_cast<double>(std::max(1, spriteWidth)));
         textureX = std::clamp(textureX, 0, enemyTextureWidth - 1);
         SDL_Rect source = {textureX, 0, 1, enemyTextureHeight};
-        SDL_Rect destination = {stripe, startY, 1, endY - startY};
+        SDL_Rect destination = {stripe, startY, std::min(2, SCREEN_WIDTH - stripe), endY - startY};
         SDL_RenderCopy(renderer, enemyTexture, &source, &destination);
     }
 }
@@ -917,130 +919,49 @@ void drawGameOver(SDL_Renderer* renderer, TTF_Font* titleFont, TTF_Font* smallFo
 }
 
 void drawNaturalGroundLight(SDL_Renderer* renderer) {
-    SDL_SetRenderDrawBlendMode(
-        renderer,
-        SDL_BLENDMODE_ADD
-    );
+    // 軽量版：1ピクセルずつではなく、横線を重ねて同じ形の光を描く。
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_ADD);
 
-    int horizonY = getHorizonY();
-
-    int startY = horizonY + 8;
-    int endY = SCREEN_HEIGHT - 18;
-
+    const int horizonY = getHorizonY();
+    const int startY = horizonY + 8;
+    const int endY = SCREEN_HEIGHT - 18;
     if (startY >= endY) {
-        SDL_SetRenderDrawBlendMode(
-            renderer,
-            SDL_BLENDMODE_BLEND
-        );
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         return;
     }
 
-    int centerX = SCREEN_WIDTH / 2;
+    const int centerX = SCREEN_WIDTH / 2;
+    constexpr int LIGHT_LAYERS = 8;
 
-    for (int y = startY; y <= endY; y++) {
-        double depth =
-            static_cast<double>(
-                y - startY
-            ) /
-            static_cast<double>(
-                endY - startY
-            );
-
-        double nearAmount =
-            std::pow(depth, 1.35);
-
-        int halfWidth =
-            static_cast<int>(
-                470 -
-                365 * nearAmount
-            );
-
-        double edgeSoftness = 0.32;
-        int coreHalfWidth =
-            static_cast<int>(
-                halfWidth *
-                (1.0 - edgeSoftness)
-            );
-
-        int maxAlpha =
-            static_cast<int>(
-                (
-                    6 +
-                    76 *
-                    std::pow(depth, 1.75)
-                ) *
-                brightnessMultiplier
-            );
-
-        maxAlpha = std::clamp(
-            maxAlpha,
-            2,
-            120
+    // 2行ずつ描画して負荷をさらに半分にする。
+    for (int y = startY; y <= endY; y += 2) {
+        const double depth = static_cast<double>(y - startY) /
+                             static_cast<double>(endY - startY);
+        const double nearAmount = std::pow(depth, 1.35);
+        const int halfWidth = static_cast<int>(470 - 365 * nearAmount);
+        const int maxAlpha = std::clamp(
+            static_cast<int>((6 + 76 * std::pow(depth, 1.75)) * brightnessMultiplier),
+            2, 120
         );
 
-        for (int x = centerX - halfWidth;
-             x <= centerX + halfWidth;
-             x++) {
-            if (x < 0 || x >= SCREEN_WIDTH) {
-                continue;
-            }
+        for (int layer = LIGHT_LAYERS; layer >= 1; --layer) {
+            const double t = layer / static_cast<double>(LIGHT_LAYERS);
+            const int layerHalfWidth = std::max(1, static_cast<int>(halfWidth * t));
+            const double strength = 1.0 - t;
+            const int alpha = std::max(1, static_cast<int>(maxAlpha * (0.10 + strength * strength * 0.34)));
 
-            int distanceFromCenter =
-                std::abs(x - centerX);
-
-            double horizontalStrength = 1.0;
-
-            if (distanceFromCenter > coreHalfWidth) {
-                double fadePosition =
-                    static_cast<double>(
-                        distanceFromCenter -
-                        coreHalfWidth
-                    ) /
-                    std::max(
-                        1,
-                        halfWidth -
-                        coreHalfWidth
-                    );
-
-                horizontalStrength =
-                    1.0 -
-                    fadePosition;
-
-                horizontalStrength =
-                    horizontalStrength *
-                    horizontalStrength;
-            }
-
-            int alpha =
-                static_cast<int>(
-                    maxAlpha *
-                    horizontalStrength
-                );
-
-            if (alpha <= 0) {
-                continue;
-            }
-
-            SDL_SetRenderDrawColor(
-                renderer,
-                250,
-                236,
-                185,
-                alpha
-            );
-
-            SDL_RenderDrawPoint(
-                renderer,
-                x,
-                y
-            );
+            SDL_SetRenderDrawColor(renderer, 250, 236, 185, static_cast<Uint8>(alpha));
+            SDL_Rect band = {
+                centerX - layerHalfWidth,
+                y,
+                layerHalfWidth * 2,
+                std::min(2, endY - y + 1)
+            };
+            SDL_RenderFillRect(renderer, &band);
         }
     }
 
-    SDL_SetRenderDrawBlendMode(
-        renderer,
-        SDL_BLENDMODE_BLEND
-    );
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 }
 
 void drawCrosshair(SDL_Renderer* renderer) {
@@ -2503,7 +2424,13 @@ int main() {
         ) {
             updateSmoothCamera(deltaTime);
             updatePlayer(deltaTime);
-            updateEnemy(deltaTime);
+            // 経路探索は毎フレーム行わず約10回/秒に制限する。
+            static double enemyUpdateAccumulator = 0.0;
+            enemyUpdateAccumulator += deltaTime;
+            if (enemyUpdateAccumulator >= 0.10) {
+                updateEnemy(enemyUpdateAccumulator);
+                enemyUpdateAccumulator = 0.0;
+            }
 
             if (enemyTouchedPlayer()) {
                 SDL_SetRelativeMouseMode(SDL_FALSE);
